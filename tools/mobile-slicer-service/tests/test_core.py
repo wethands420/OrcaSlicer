@@ -1,4 +1,5 @@
 import unittest
+import unittest.mock
 import sys
 import zipfile
 from pathlib import Path
@@ -56,6 +57,49 @@ class CoreHelpersTest(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 main._inspect_download_file(archive)
+
+    def test_inspect_zip_content_even_with_bin_extension(self):
+        with TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "download.bin"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("cube.stl", "solid cube\nendsolid cube\n")
+
+            result = main._inspect_download_file(archive)
+
+        self.assertEqual(result["kind"], "archive")
+        self.assertEqual(result["supported_entries"][0]["path"], "cube.stl")
+
+    def test_create_import_ignores_entry_path_for_direct_3mf(self):
+        with TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            source = data_dir / "direct.3mf"
+            with zipfile.ZipFile(source, "w") as zf:
+                zf.writestr("[Content_Types].xml", "<Types/>")
+                zf.writestr("3D/3dmodel.model", "<model/>")
+
+            old_downloads = main.remote_downloads
+            old_imports = main.imported_models
+            main.remote_downloads = {
+                "download-id": main.RemoteDownloadJob(
+                    id="download-id",
+                    url="https://example.invalid/direct.3mf",
+                    filename="direct.3mf",
+                    output_dir=str(data_dir),
+                    status="succeeded",
+                    path=str(source),
+                    size=source.stat().st_size,
+                )
+            }
+            main.imported_models = {}
+            try:
+                with unittest.mock.patch.dict(main.os.environ, {"ORCA_SERVICE_DATA_DIR": str(data_dir)}):
+                    result = main.create_import(main.ImportRequest(download_id="download-id", entry_path="direct.3mf"))
+            finally:
+                main.remote_downloads = old_downloads
+                main.imported_models = old_imports
+
+        self.assertEqual(result["imported_model"]["filename"], "direct.3mf")
+        self.assertEqual(result["imported_model"]["import_type"], "project_or_geometry")
 
 
 if __name__ == "__main__":

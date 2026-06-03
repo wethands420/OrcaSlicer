@@ -237,8 +237,37 @@ def _is_safe_zip_member(name: str) -> bool:
     return bool(name) and not entry.is_absolute() and ".." not in entry.parts
 
 
+def _looks_like_3mf_archive(path: Path) -> bool:
+    if not zipfile.is_zipfile(path):
+        return False
+    with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
+    return "[Content_Types].xml" in names and "3D/3dmodel.model" in names
+
+
 def _inspect_download_file(path: Path) -> dict[str, Any]:
     import_type = _detect_import_type(path)
+    if not import_type:
+        if zipfile.is_zipfile(path):
+            import_type = "archive"
+        else:
+            return {
+                "kind": "unsupported",
+                "filename": path.name,
+                "size": path.stat().st_size,
+                "supported_entries": [],
+            }
+
+    if import_type == "archive" and path.suffix.lower() not in SUPPORTED_ARCHIVE_SUFFIXES and _looks_like_3mf_archive(path):
+        return {
+            "kind": "project_or_geometry",
+            "filename": path.name,
+            "size": path.stat().st_size,
+            "supported_entries": [
+                {"path": path.name, "filename": path.name, "import_type": "project_or_geometry", "size": path.stat().st_size}
+            ],
+        }
+
     if not import_type:
         return {
             "kind": "unsupported",
@@ -707,12 +736,25 @@ def create_import(request: ImportRequest) -> dict[str, object]:
     model_id = str(uuid.uuid4())
     target_dir = _imports_dir() / model_id
     target_dir.mkdir(parents=True, exist_ok=True)
+    source_import_type = _detect_import_type(source_path)
+    if not source_import_type and zipfile.is_zipfile(source_path):
+        source_import_type = "archive"
 
-    if request.entry_path:
+    if source_import_type == "archive" and not request.entry_path and _looks_like_3mf_archive(source_path):
+        import_type = "project_or_geometry"
+        target_path = target_dir / _safe_name(source_path.with_suffix(".3mf").name)
+        shutil.copy2(source_path, target_path)
+        source_entry_path = None
+    elif source_import_type == "archive":
+        if not request.entry_path:
+            raise HTTPException(status_code=400, detail="archive import requires selecting a supported entry")
         with zipfile.ZipFile(source_path) as archive:
             if not _is_safe_zip_member(request.entry_path):
                 raise HTTPException(status_code=400, detail="unsafe zip entry")
-            info = archive.getinfo(request.entry_path)
+            try:
+                info = archive.getinfo(request.entry_path)
+            except KeyError as exc:
+                raise HTTPException(status_code=400, detail="zip entry not found") from exc
             import_type = _detect_import_type(Path(info.filename))
             if not import_type or import_type == "archive":
                 raise HTTPException(status_code=400, detail="unsupported zip entry")
@@ -721,7 +763,7 @@ def create_import(request: ImportRequest) -> dict[str, object]:
                 shutil.copyfileobj(source, target)
             source_entry_path = request.entry_path
     else:
-        import_type = _detect_import_type(source_path)
+        import_type = source_import_type
         if not import_type or import_type == "archive":
             raise HTTPException(status_code=400, detail="download requires selecting a supported archive entry")
         target_path = target_dir / _safe_name(source_path.name)

@@ -3,6 +3,8 @@ package de.orcamobile.app;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -62,6 +64,22 @@ public class MainActivity extends Activity {
         addQuickLink(quickLinks, "Thingiverse", "https://www.thingiverse.com/");
         addQuickLink(quickLinks, "Cults3D", "https://cults3d.com/");
         root.addView(quickLinks, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout browserTools = new LinearLayout(this);
+        browserTools.setOrientation(LinearLayout.HORIZONTAL);
+        Button backButton = new Button(this);
+        backButton.setText("Zurück");
+        backButton.setOnClickListener(v -> {
+            if (webView.canGoBack()) {
+                webView.goBack();
+            }
+        });
+        browserTools.addView(backButton, new LinearLayout.LayoutParams(0, -2, 1));
+        Button externalButton = new Button(this);
+        externalButton.setText("Extern öffnen");
+        externalButton.setOnClickListener(v -> openCurrentPageExternally());
+        browserTools.addView(externalButton, new LinearLayout.LayoutParams(0, -2, 1));
+        root.addView(browserTools, new LinearLayout.LayoutParams(-1, -2));
 
         webView = new WebView(this);
         WebSettings settings = webView.getSettings();
@@ -131,6 +149,7 @@ public class MainActivity extends Activity {
                 body.put("mime_type", mimeType);
                 body.put("user_agent", userAgent);
                 body.put("cookie_header", cookies == null ? "" : cookies);
+                body.put("referer", webView.getUrl() == null ? "" : webView.getUrl());
                 body.put("debug_log_cookies", true);
                 JSONObject response = postJson("/api/v1/remote-downloads", body);
                 lastDownloadId = response.getJSONObject("download").getString("id");
@@ -164,18 +183,23 @@ public class MainActivity extends Activity {
         JSONObject response = postJson("/api/v1/remote-downloads/" + lastDownloadId + "/inspect", new JSONObject());
         JSONObject inspection = response.getJSONObject("inspection");
         JSONArray entries = inspection.getJSONArray("supported_entries");
+        if (entries.length() == 0) {
+            setStatus("Keine unterstützte Modell-/Projektdatei gefunden: " + inspection.optString("kind"));
+            return;
+        }
         setStatus("Gefundene Dateien: " + entries.length());
-        mainHandler.post(() -> renderImportEntries(entries));
+        String kind = inspection.optString("kind");
+        mainHandler.post(() -> renderImportEntries(kind, entries));
     }
 
-    private void renderImportEntries(JSONArray entries) {
+    private void renderImportEntries(String kind, JSONArray entries) {
         importList.removeAllViews();
         for (int i = 0; i < entries.length(); i++) {
             JSONObject entry = entries.optJSONObject(i);
             if (entry == null) {
                 continue;
             }
-            String path = entry.optString("path");
+            String path = "archive".equals(kind) ? entry.optString("path") : null;
             String label = entry.optString("filename") + " (" + entry.optString("import_type") + ")";
             Button button = new Button(this);
             button.setText("Importieren: " + label);
@@ -190,7 +214,9 @@ public class MainActivity extends Activity {
             try {
                 JSONObject body = new JSONObject();
                 body.put("download_id", lastDownloadId);
-                body.put("entry_path", entryPath);
+                if (entryPath != null && !entryPath.isEmpty()) {
+                    body.put("entry_path", entryPath);
+                }
                 JSONObject response = postJson("/api/v1/imports", body);
                 JSONObject model = response.getJSONObject("imported_model");
                 setStatus("Importiert: " + model.getString("filename"));
@@ -198,6 +224,14 @@ public class MainActivity extends Activity {
                 setStatus("Import fehlgeschlagen: " + e.getMessage());
             }
         });
+    }
+
+    private void openCurrentPageExternally() {
+        String url = webView.getUrl();
+        if (url == null || url.isEmpty()) {
+            return;
+        }
+        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
     }
 
     private JSONObject getJson(String path) throws Exception {

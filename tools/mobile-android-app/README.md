@@ -34,3 +34,12 @@ Change it in the text field at the top of the app if your VM IP changes.
 
 Slicing, upload to Bambu A1, and print start are already available in the VM API
 but are not wired into this Android screen yet.
+
+## Login Notes
+
+Google sign-in may block Android WebView with a `disallowed_useragent` style
+message. That is a Google OAuth restriction for embedded browsers, not a VM
+download bug. Use a platform-native username/password login when available.
+
+The app includes an `Extern öffnen` button for pages that need a full browser,
+but cookies from Chrome are not shared back into the WebView.
