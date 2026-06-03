@@ -6,16 +6,21 @@ import queue
 import re
 import shlex
 import shutil
+import socket
+import ssl
+import struct
 import subprocess
 import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from ftplib import FTP_TLS
 from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 
 JobState = Literal["queued", "running", "succeeded", "failed"]
@@ -67,18 +72,61 @@ class SliceJob:
     status: JobState = "queued"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    cli_args: list[str] = field(default_factory=list)
     command: list[str] = field(default_factory=list)
     exit_code: int | None = None
     error: str | None = None
 
 
+@dataclass
+class PreparedPrint:
+    job_id: str
+    path: str
+    filename: str
+    plate_gcode_path: str = "Metadata/plate_1.gcode"
+    uploaded_filename: str | None = None
+    uploaded_at: float | None = None
+
+
+class PrinterStartRequest(BaseModel):
+    prepared_filename: str | None = None
+    timelapse: bool = False
+    bed_levelling: bool = True
+    flow_cali: bool = False
+    vibration_cali: bool = False
+    layer_inspect: bool = True
+    use_ams: bool = False
+    ams_mapping: str = ""
+
+
+class ImplicitFTP_TLS(FTP_TLS):
+    def connect(self, host: str = "", port: int = 0, timeout: float | object = -999, source_address=None):
+        if host:
+            self.host = host
+        if port:
+            self.port = port
+        if timeout != -999:
+            self.timeout = timeout
+        self.sock = socket.create_connection((self.host, self.port), self.timeout, source_address)
+        self.af = self.sock.family
+        self.sock = self.context.wrap_socket(self.sock, server_hostname=self.host)
+        self.file = self.sock.makefile("r", encoding=self.encoding)
+        self.welcome = self.getresp()
+        return self.welcome
+
+
 app = FastAPI(title="OrcaSlicer Mobile Slicer Service", version="0.1.0")
 jobs: dict[str, SliceJob] = {}
+prepared_prints: dict[str, PreparedPrint] = {}
 job_queue: queue.Queue[str] = queue.Queue()
 
 
 def _job_dir(job_id: str) -> Path:
     return _data_dir() / "jobs" / job_id
+
+
+def _prepared_print_path(job_id: str) -> Path:
+    return _job_dir(job_id) / "print" / f"{job_id}.gcode.3mf"
 
 
 def _set_status(job: SliceJob, status: JobState, error: str | None = None) -> None:
@@ -113,6 +161,213 @@ def _find_output_file(output_dir: Path) -> Path | None:
     return files[0] if files else None
 
 
+def _printer_ip() -> str:
+    value = os.environ.get("BAMBU_PRINTER_IP")
+    if not value:
+        raise HTTPException(status_code=503, detail="BAMBU_PRINTER_IP is not set")
+    return value
+
+
+def _printer_serial() -> str:
+    value = os.environ.get("BAMBU_PRINTER_SERIAL")
+    if not value:
+        raise HTTPException(status_code=503, detail="BAMBU_PRINTER_SERIAL is not set")
+    return value
+
+
+def _printer_access_code() -> str:
+    value = os.environ.get("BAMBU_ACCESS_CODE")
+    if not value:
+        raise HTTPException(status_code=503, detail="BAMBU_ACCESS_CODE is not set")
+    return value
+
+
+def _mqtt_encode_string(value: str) -> bytes:
+    data = value.encode("utf-8")
+    return struct.pack("!H", len(data)) + data
+
+
+def _mqtt_remaining_length(length: int) -> bytes:
+    encoded: list[int] = []
+    while True:
+        byte = length % 128
+        length //= 128
+        if length:
+            byte |= 128
+        encoded.append(byte)
+        if not length:
+            break
+    return bytes(encoded)
+
+
+def _mqtt_packet(packet_type: int, payload: bytes) -> bytes:
+    return bytes([packet_type]) + _mqtt_remaining_length(len(payload)) + payload
+
+
+def _mqtt_read_packet(sock: ssl.SSLSocket, timeout: float = 5.0) -> tuple[int | None, bytes]:
+    sock.settimeout(timeout)
+    first = sock.recv(1)
+    if not first:
+        return None, b""
+
+    multiplier = 1
+    length = 0
+    while True:
+        byte = sock.recv(1)[0]
+        length += (byte & 127) * multiplier
+        if not byte & 128:
+            break
+        multiplier *= 128
+
+    payload = b""
+    while len(payload) < length:
+        payload += sock.recv(length - len(payload))
+    return first[0], payload
+
+
+def _mqtt_connect(client_id: str) -> ssl.SSLSocket:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    raw_sock = socket.create_connection((_printer_ip(), 8883), timeout=10)
+    sock = context.wrap_socket(raw_sock, server_hostname=_printer_ip())
+    payload = (
+        _mqtt_encode_string("MQTT")
+        + bytes([4, 0xC2])
+        + struct.pack("!H", 60)
+        + _mqtt_encode_string(client_id)
+        + _mqtt_encode_string("bblp")
+        + _mqtt_encode_string(_printer_access_code())
+    )
+    sock.sendall(_mqtt_packet(0x10, payload))
+    packet_type, data = _mqtt_read_packet(sock, timeout=8)
+    if packet_type != 0x20 or len(data) < 2 or data[1] != 0:
+        sock.close()
+        raise HTTPException(status_code=502, detail="printer MQTT login failed")
+    return sock
+
+
+def _mqtt_subscribe(sock: ssl.SSLSocket, topic: str) -> None:
+    payload = struct.pack("!H", 1) + _mqtt_encode_string(topic) + bytes([0])
+    sock.sendall(_mqtt_packet(0x82, payload))
+    _mqtt_read_packet(sock, timeout=5)
+
+
+def _mqtt_publish(sock: ssl.SSLSocket, topic: str, body: dict[str, object], qos: int = 0) -> None:
+    payload = _mqtt_encode_string(topic)
+    if qos == 1:
+        payload += struct.pack("!H", 2)
+    payload += json.dumps(body, separators=(",", ":")).encode("utf-8")
+    sock.sendall(_mqtt_packet(0x30 | (qos << 1), payload))
+
+
+def _mqtt_collect_reports(sock: ssl.SSLSocket, seconds: float) -> list[dict[str, object]]:
+    reports: list[dict[str, object]] = []
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            packet_type, payload = _mqtt_read_packet(sock, timeout=2)
+        except socket.timeout:
+            continue
+        if packet_type == 0x40:
+            continue
+        if not packet_type or packet_type >> 4 != 3 or len(payload) < 2:
+            continue
+
+        topic_len = struct.unpack("!H", payload[:2])[0]
+        body_start = 2 + topic_len
+        if packet_type & 0x06:
+            body_start += 2
+        try:
+            reports.append(json.loads(payload[body_start:].decode("utf-8", errors="replace")))
+        except json.JSONDecodeError:
+            continue
+    return reports
+
+
+def _printer_command(body: dict[str, object], qos: int = 0, wait_seconds: float = 8.0) -> list[dict[str, object]]:
+    serial = _printer_serial()
+    sock = _mqtt_connect(f"orcaslicer-mobile-{uuid.uuid4()}")
+    try:
+        _mqtt_subscribe(sock, f"device/{serial}/report")
+        _mqtt_publish(sock, f"device/{serial}/request", body, qos=qos)
+        return _mqtt_collect_reports(sock, wait_seconds)
+    finally:
+        sock.close()
+
+
+def _ftp_upload(local_path: Path, remote_name: str) -> None:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    ftp = ImplicitFTP_TLS(context=context, timeout=45)
+    try:
+        ftp.connect(_printer_ip(), 990)
+        ftp.login("bblp", _printer_access_code())
+        ftp.prot_p()
+        with local_path.open("rb") as source:
+            try:
+                ftp.storbinary(f"STOR {remote_name}", source, blocksize=1024 * 256)
+            except TimeoutError:
+                # Bambu FTPS may time out during TLS unwrap after a completed transfer.
+                pass
+    finally:
+        try:
+            ftp.close()
+        except Exception:
+            pass
+
+
+def _ftp_file_exists(remote_name: str) -> bool:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    ftp = ImplicitFTP_TLS(context=context, timeout=20)
+    try:
+        ftp.connect(_printer_ip(), 990)
+        ftp.login("bblp", _printer_access_code())
+        ftp.prot_p()
+        items: list[str] = []
+        ftp.retrlines("LIST", items.append)
+        return any(remote_name in item for item in items)
+    finally:
+        try:
+            ftp.quit()
+        except Exception:
+            ftp.close()
+
+
+def _summarize_reports(reports: list[dict[str, object]]) -> dict[str, object]:
+    summary: dict[str, object] = {}
+    for report in reports:
+        print_report = report.get("print")
+        pushing_report = report.get("pushing")
+        if isinstance(print_report, dict):
+            for key in (
+                "sequence_id",
+                "command",
+                "result",
+                "reason",
+                "gcode_state",
+                "print_type",
+                "mc_print_stage",
+                "mc_percent",
+                "gcode_file",
+                "subtask_name",
+                "print_error",
+                "nozzle_target_temper",
+                "bed_target_temper",
+                "nozzle_temper",
+                "bed_temper",
+                "mc_remaining_time",
+            ):
+                if key in print_report:
+                    summary[key] = print_report[key]
+        if isinstance(pushing_report, dict):
+            summary["pushing"] = pushing_report
+    return summary
+
+
 def _run_job(job_id: str) -> None:
     job = jobs[job_id]
     output_dir = Path(job.output_dir)
@@ -121,7 +376,7 @@ def _run_job(job_id: str) -> None:
 
     try:
         _set_status(job, "running")
-        command = [_orcaslicer_bin(), *_default_args(), *job.command, "--outputdir", str(output_dir), job.input_path]
+        command = [_orcaslicer_bin(), *_default_args(), *job.cli_args, "--outputdir", str(output_dir), job.input_path]
         job.command = command
         job.updated_at = time.time()
 
@@ -157,7 +412,8 @@ def _startup() -> None:
 @app.get("/health")
 def health() -> dict[str, object]:
     configured = bool(os.environ.get("ORCA_SLICER_BIN"))
-    return {"ok": True, "orcaslicer_configured": configured}
+    printer_configured = all(os.environ.get(key) for key in ("BAMBU_PRINTER_IP", "BAMBU_PRINTER_SERIAL", "BAMBU_ACCESS_CODE"))
+    return {"ok": True, "orcaslicer_configured": configured, "printer_configured": printer_configured}
 
 
 @app.post("/api/v1/jobs")
@@ -180,6 +436,7 @@ async def create_job(file: UploadFile = File(...), cli_args: str | None = Form(d
         filename=filename,
         input_path=str(input_path),
         output_dir=str(output_dir),
+        cli_args=extra_args,
         command=extra_args,
     )
     jobs[job_id] = job
@@ -212,3 +469,112 @@ def get_output(job_id: str) -> FileResponse:
     if not output:
         raise HTTPException(status_code=404, detail="output file not found")
     return FileResponse(output, filename=output.name)
+
+
+@app.post("/api/v1/jobs/{job_id}/prepare-print")
+def prepare_print(job_id: str) -> dict[str, object]:
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.status != "succeeded":
+        raise HTTPException(status_code=409, detail=f"job is {job.status}")
+
+    target_path = _prepared_print_path(job_id)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_path = target_path.parent / "prepare-print.stdout.log"
+    stderr_path = target_path.parent / "prepare-print.stderr.log"
+    command = [_orcaslicer_bin(), *_default_args(), *job.cli_args, "--export-3mf", str(target_path), job.input_path]
+
+    with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+        completed = subprocess.run(command, stdout=stdout_file, stderr=stderr_file, check=False)
+
+    if completed.returncode != 0 or not target_path.exists():
+        stderr_tail = stderr_path.read_text(errors="replace")[-4000:] if stderr_path.exists() else ""
+        raise HTTPException(status_code=500, detail=stderr_tail or f"OrcaSlicer exited with code {completed.returncode}")
+
+    prepared = PreparedPrint(job_id=job_id, path=str(target_path), filename=target_path.name)
+    prepared_prints[job_id] = prepared
+    return {"prepared_print": asdict(prepared)}
+
+
+@app.post("/api/v1/jobs/{job_id}/upload-print")
+def upload_print(job_id: str) -> dict[str, object]:
+    prepared = prepared_prints.get(job_id)
+    if not prepared:
+        path = _prepared_print_path(job_id)
+        if not path.exists():
+            raise HTTPException(status_code=409, detail="print file is not prepared")
+        prepared = PreparedPrint(job_id=job_id, path=str(path), filename=path.name)
+        prepared_prints[job_id] = prepared
+
+    local_path = Path(prepared.path)
+    if not local_path.exists():
+        raise HTTPException(status_code=404, detail="prepared print file not found")
+
+    remote_name = _safe_name(prepared.filename)
+    _ftp_upload(local_path, remote_name)
+    if not _ftp_file_exists(remote_name):
+        raise HTTPException(status_code=502, detail="printer upload could not be verified")
+
+    prepared.uploaded_filename = remote_name
+    prepared.uploaded_at = time.time()
+    return {"prepared_print": asdict(prepared), "uploaded": True}
+
+
+@app.get("/api/v1/printer/status")
+def printer_status() -> dict[str, object]:
+    reports = _printer_command(
+        {"pushing": {"sequence_id": str(int(time.time())), "command": "pushall", "version": 1, "push_target": 1}},
+        wait_seconds=8,
+    )
+    return {"status": _summarize_reports(reports), "reports": reports[-3:]}
+
+
+@app.post("/api/v1/jobs/{job_id}/start-print")
+def start_print(job_id: str, request: PrinterStartRequest | None = None) -> dict[str, object]:
+    request = request or PrinterStartRequest()
+    prepared = prepared_prints.get(job_id)
+    if not prepared:
+        raise HTTPException(status_code=409, detail="print file is not prepared and uploaded")
+
+    remote_name = request.prepared_filename or prepared.uploaded_filename
+    if not remote_name:
+        raise HTTPException(status_code=409, detail="print file has not been uploaded")
+    remote_name = _safe_name(remote_name)
+
+    sequence_id = str(int(time.time()))
+    body = {
+        "print": {
+            "sequence_id": sequence_id,
+            "command": "project_file",
+            "param": prepared.plate_gcode_path,
+            "project_id": "0",
+            "profile_id": "0",
+            "task_id": "0",
+            "subtask_id": "0",
+            "subtask_name": Path(remote_name).stem[:64],
+            "file": "",
+            "url": f"ftp:///{remote_name}",
+            "md5": "",
+            "timelapse": request.timelapse,
+            "bed_type": "auto",
+            "bed_levelling": request.bed_levelling,
+            "flow_cali": request.flow_cali,
+            "vibration_cali": request.vibration_cali,
+            "layer_inspect": request.layer_inspect,
+            "ams_mapping": request.ams_mapping,
+            "use_ams": request.use_ams,
+        }
+    }
+    reports = _printer_command(body, wait_seconds=12)
+    summary = _summarize_reports(reports)
+    if summary.get("result") == "fail":
+        raise HTTPException(status_code=502, detail={"message": "printer rejected start command", "status": summary})
+    return {"started": summary.get("result") == "success" or summary.get("gcode_state") in {"PREPARE", "RUNNING"}, "status": summary}
+
+
+@app.post("/api/v1/printer/cancel")
+def cancel_print() -> dict[str, object]:
+    body = {"print": {"sequence_id": str(int(time.time())), "command": "stop", "param": ""}}
+    reports = _printer_command(body, qos=1, wait_seconds=12)
+    return {"cancel_requested": True, "status": _summarize_reports(reports)}

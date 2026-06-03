@@ -39,6 +39,11 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8787
 - `POST /api/v1/jobs` with multipart field `file`
 - `GET /api/v1/jobs/{job_id}`
 - `GET /api/v1/jobs/{job_id}/output`
+- `POST /api/v1/jobs/{job_id}/prepare-print`
+- `POST /api/v1/jobs/{job_id}/upload-print`
+- `POST /api/v1/jobs/{job_id}/start-print`
+- `GET /api/v1/printer/status`
+- `POST /api/v1/printer/cancel`
 
 Optional multipart field `cli_args` may contain a JSON array of extra OrcaSlicer
 CLI arguments. The service appends `--outputdir <job-output-dir> <uploaded-file>`.
@@ -55,9 +60,34 @@ Override them with:
 export ORCA_SERVICE_DEFAULT_ARGS='--slice 0 --load-settings "/path/machine.json;/path/process.json" --load-filaments /path/filament.json'
 ```
 
+## Bambu LAN printing
+
+Direct Bambu printing is intentionally split into explicit steps. The service
+does not start a printer immediately after slicing.
+
+Set these variables only on the machine running the service:
+
+```bash
+export BAMBU_PRINTER_IP=192.168.1.26
+export BAMBU_PRINTER_SERIAL=YOUR_PRINTER_SERIAL
+export BAMBU_ACCESS_CODE=********
+```
+
+Workflow:
+
+1. `POST /api/v1/jobs` uploads and slices the model.
+2. `POST /api/v1/jobs/{job_id}/prepare-print` creates a Bambu-compatible
+   `.gcode.3mf` containing `Metadata/plate_1.gcode`.
+3. `POST /api/v1/jobs/{job_id}/upload-print` uploads that file to the printer
+   over LAN FTPS.
+4. `POST /api/v1/jobs/{job_id}/start-print` starts it with the Bambu
+   `project_file` MQTT command.
+5. `POST /api/v1/printer/cancel` sends the Orca-compatible `print.stop`
+   command.
+
 ## Notes
 
 This is a first server-side integration layer, not a hardened public internet
 service. Put it behind a VPN or private network while developing. Authentication,
-streaming uploads, printer dispatch, and preset discovery are planned follow-up
-work.
+streaming uploads, persistent job storage, and preset discovery are planned
+follow-up work.
