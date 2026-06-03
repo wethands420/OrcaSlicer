@@ -48,6 +48,8 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private LinearLayout importList;
     private String lastDownloadId;
+    private String lastImportedModelId;
+    private String lastJobId;
     private final Map<String, PendingBlob> pendingBlobs = new HashMap<>();
 
     @Override
@@ -347,11 +349,153 @@ public class MainActivity extends Activity {
                 }
                 JSONObject response = postJson("/api/v1/imports", body);
                 JSONObject model = response.getJSONObject("imported_model");
+                lastImportedModelId = model.getString("id");
                 setStatus("Importiert: " + model.getString("filename"));
+                mainHandler.post(() -> renderImportedModelActions(model));
             } catch (Exception e) {
                 setStatus("Import fehlgeschlagen: " + e.getMessage());
             }
         });
+    }
+
+    private void renderImportedModelActions(JSONObject model) {
+        importList.removeAllViews();
+        TextView label = new TextView(this);
+        label.setText("Importiert: " + model.optString("filename"));
+        importList.addView(label, new LinearLayout.LayoutParams(-1, -2));
+        addActionButton("Slice starten", v -> startSliceForImportedModel());
+    }
+
+    private void startSliceForImportedModel() {
+        if (lastImportedModelId == null || lastImportedModelId.isEmpty()) {
+            setStatus("Kein importiertes Modell ausgewählt.");
+            return;
+        }
+        setStatus("Slice-Job wird auf der VM gestartet...");
+        executor.submit(() -> {
+            try {
+                JSONObject body = new JSONObject();
+                body.put("cli_args", new JSONArray());
+                JSONObject response = postJson("/api/v1/imports/" + lastImportedModelId + "/slice", body);
+                lastJobId = response.getJSONObject("job").getString("id");
+                pollSliceJob();
+            } catch (Exception e) {
+                setStatus("Slice konnte nicht gestartet werden: " + e.getMessage());
+            }
+        });
+    }
+
+    private void pollSliceJob() throws Exception {
+        for (int i = 0; i < 360; i++) {
+            JSONObject response = getJson("/api/v1/jobs/" + lastJobId);
+            JSONObject job = response.getJSONObject("job");
+            String status = job.getString("status");
+            setStatus("Slice: " + status);
+            if ("succeeded".equals(status)) {
+                setStatus("Slice fertig: " + job.optString("output_name"));
+                mainHandler.post(() -> renderSlicedJobActions(job));
+                return;
+            }
+            if ("failed".equals(status)) {
+                setStatus("Slice fehlgeschlagen: " + job.optString("error"));
+                return;
+            }
+            Thread.sleep(1000);
+        }
+        setStatus("Slice dauert zu lange.");
+    }
+
+    private void renderSlicedJobActions(JSONObject job) {
+        importList.removeAllViews();
+        TextView label = new TextView(this);
+        label.setText("Slice fertig: " + job.optString("output_name"));
+        importList.addView(label, new LinearLayout.LayoutParams(-1, -2));
+        addActionButton("Druckdatei vorbereiten", v -> preparePrintFile());
+    }
+
+    private void preparePrintFile() {
+        if (lastJobId == null || lastJobId.isEmpty()) {
+            setStatus("Kein Slice-Job verfügbar.");
+            return;
+        }
+        setStatus("Druckdatei wird vorbereitet...");
+        executor.submit(() -> {
+            try {
+                JSONObject response = postJson("/api/v1/jobs/" + lastJobId + "/prepare-print", new JSONObject());
+                JSONObject prepared = response.getJSONObject("prepared_print");
+                setStatus("Vorbereitet: " + prepared.getString("filename"));
+                mainHandler.post(() -> renderPreparedPrintActions(prepared));
+            } catch (Exception e) {
+                setStatus("Vorbereiten fehlgeschlagen: " + e.getMessage());
+            }
+        });
+    }
+
+    private void renderPreparedPrintActions(JSONObject prepared) {
+        importList.removeAllViews();
+        TextView label = new TextView(this);
+        label.setText("Druckdatei: " + prepared.optString("filename"));
+        importList.addView(label, new LinearLayout.LayoutParams(-1, -2));
+        addActionButton("Zum Drucker hochladen", v -> uploadPrintFile());
+    }
+
+    private void uploadPrintFile() {
+        if (lastJobId == null || lastJobId.isEmpty()) {
+            setStatus("Kein Slice-Job verfügbar.");
+            return;
+        }
+        setStatus("Upload zum Drucker läuft...");
+        executor.submit(() -> {
+            try {
+                JSONObject response = postJson("/api/v1/jobs/" + lastJobId + "/upload-print", new JSONObject());
+                JSONObject prepared = response.getJSONObject("prepared_print");
+                setStatus("Hochgeladen: " + prepared.optString("uploaded_filename"));
+                mainHandler.post(() -> renderUploadedPrintActions(prepared));
+            } catch (Exception e) {
+                setStatus("Upload fehlgeschlagen: " + e.getMessage());
+            }
+        });
+    }
+
+    private void renderUploadedPrintActions(JSONObject prepared) {
+        importList.removeAllViews();
+        TextView label = new TextView(this);
+        label.setText("Auf Drucker: " + prepared.optString("uploaded_filename"));
+        importList.addView(label, new LinearLayout.LayoutParams(-1, -2));
+        addActionButton("Druck starten", v -> confirmStartPrint());
+    }
+
+    private void confirmStartPrint() {
+        new AlertDialog.Builder(this)
+                .setTitle("Druck starten?")
+                .setMessage("Der Druck wird auf dem Bambu A1 gestartet.")
+                .setNegativeButton("Abbrechen", null)
+                .setPositiveButton("Starten", (dialog, which) -> startPrint())
+                .show();
+    }
+
+    private void startPrint() {
+        if (lastJobId == null || lastJobId.isEmpty()) {
+            setStatus("Kein Slice-Job verfügbar.");
+            return;
+        }
+        setStatus("Druckstart wird gesendet...");
+        executor.submit(() -> {
+            try {
+                JSONObject response = postJson("/api/v1/jobs/" + lastJobId + "/start-print", new JSONObject());
+                JSONObject status = response.optJSONObject("status");
+                setStatus(status == null ? "Druckstart gesendet." : "Druckstart gesendet: " + status.optString("gcode_state"));
+            } catch (Exception e) {
+                setStatus("Druckstart fehlgeschlagen: " + e.getMessage());
+            }
+        });
+    }
+
+    private void addActionButton(String label, View.OnClickListener listener) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setOnClickListener(listener);
+        importList.addView(button, new LinearLayout.LayoutParams(-1, -2));
     }
 
     private void openCurrentPageExternally() {

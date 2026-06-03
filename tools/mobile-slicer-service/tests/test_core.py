@@ -143,6 +143,30 @@ class CoreHelpersTest(unittest.TestCase):
         self.assertEqual(result["imported_model"]["filename"], "download.stl")
         self.assertEqual(result["imported_model"]["import_type"], "geometry")
 
+    def test_create_slice_job_for_existing_file_queues_job_without_copying_to_phone(self):
+        with TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            imported_path = data_dir / "imports" / "model-id" / "cube.stl"
+            imported_path.parent.mkdir(parents=True)
+            imported_path.write_text("solid cube\nendsolid cube\n", encoding="utf-8")
+
+            old_jobs = main.jobs
+            old_queue = main.job_queue
+            main.jobs = {}
+            main.job_queue = unittest.mock.Mock()
+            try:
+                with unittest.mock.patch.dict(main.os.environ, {"ORCA_SERVICE_DATA_DIR": str(data_dir)}):
+                    job = main._create_slice_job_for_existing_file(imported_path, "cube.stl", [])
+            finally:
+                queue_mock = main.job_queue
+                main.jobs = old_jobs
+                main.job_queue = old_queue
+
+        queued_id = queue_mock.put.call_args.args[0]
+        self.assertEqual(job.filename, "cube.stl")
+        self.assertEqual(job.input_path, str(imported_path))
+        self.assertIn(job.id, [queued_id])
+
 
 if __name__ == "__main__":
     unittest.main()

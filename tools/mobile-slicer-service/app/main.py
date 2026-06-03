@@ -139,6 +139,10 @@ class ImportRequest(BaseModel):
     entry_path: str | None = None
 
 
+class SliceImportRequest(BaseModel):
+    cli_args: list[str] = []
+
+
 class PrinterStartRequest(BaseModel):
     prepared_filename: str | None = None
     timelapse: bool = False
@@ -658,6 +662,26 @@ def _run_job(job_id: str) -> None:
         _set_status(job, "failed", str(exc))
 
 
+def _create_slice_job_for_existing_file(input_path: Path, filename: str, cli_args: list[str]) -> SliceJob:
+    if not input_path.is_file():
+        raise FileNotFoundError(str(input_path))
+
+    job_id = str(uuid.uuid4())
+    output_dir = _job_dir(job_id) / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    job = SliceJob(
+        id=job_id,
+        filename=_safe_name(filename),
+        input_path=str(input_path),
+        output_dir=str(output_dir),
+        cli_args=cli_args,
+        command=cli_args,
+    )
+    jobs[job_id] = job
+    job_queue.put(job_id)
+    return job
+
+
 def _worker() -> None:
     while True:
         job_id = job_queue.get()
@@ -899,6 +923,20 @@ def create_import(request: ImportRequest) -> dict[str, object]:
 @app.get("/api/v1/imports")
 def list_imports() -> dict[str, object]:
     return {"imported_models": [asdict(model) for model in imported_models.values()]}
+
+
+@app.post("/api/v1/imports/{model_id}/slice")
+def slice_imported_model(model_id: str, request: SliceImportRequest | None = None) -> dict[str, object]:
+    imported = imported_models.get(model_id)
+    if not imported:
+        raise HTTPException(status_code=404, detail="imported model not found")
+
+    input_path = Path(imported.path)
+    try:
+        job = _create_slice_job_for_existing_file(input_path, imported.filename, (request.cli_args if request else []))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="imported file not found") from exc
+    return {"job": asdict(job)}
 
 
 @app.post("/api/v1/jobs/{job_id}/prepare-print")
