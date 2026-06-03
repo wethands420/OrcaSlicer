@@ -96,7 +96,13 @@ public class MainActivity extends Activity {
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         webView.addJavascriptInterface(new BlobBridge(), "OrcaBlobBridge");
-        webView.setWebViewClient(new WebViewClient());
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                injectBlobCaptureScript();
+            }
+        });
         webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
             String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
             if (url.startsWith("blob:")) {
@@ -120,6 +126,25 @@ public class MainActivity extends Activity {
 
         setContentView(root);
         webView.loadUrl("https://www.printables.com/");
+    }
+
+    private void injectBlobCaptureScript() {
+        String script = "(() => {"
+                + "if (window.__orcaBlobCaptureInstalled) return;"
+                + "window.__orcaBlobCaptureInstalled = true;"
+                + "window.__orcaBlobs = window.__orcaBlobs || {};"
+                + "const oldCreate = URL.createObjectURL.bind(URL);"
+                + "URL.createObjectURL = function(value) {"
+                + "const objectUrl = oldCreate(value);"
+                + "try { if (value instanceof Blob) window.__orcaBlobs[objectUrl] = value; } catch (error) {}"
+                + "return objectUrl;"
+                + "};"
+                + "const oldRevoke = URL.revokeObjectURL.bind(URL);"
+                + "URL.revokeObjectURL = function(objectUrl) {"
+                + "try { oldRevoke(objectUrl); } catch (error) {}"
+                + "};"
+                + "})();";
+        webView.evaluateJavascript(script, null);
     }
 
     private void addQuickLink(LinearLayout parent, String label, String url) {
@@ -188,6 +213,8 @@ public class MainActivity extends Activity {
                 + "const transferId = " + JSONObject.quote(transferId) + ";"
                 + "OrcaBlobBridge.startBlob(transferId, " + JSONObject.quote(filename) + ", " + JSONObject.quote(mimeType == null ? "" : mimeType) + ", " + JSONObject.quote(url) + ", location.href);"
                 + "async function readBlob(blobUrl) {"
+                + "const captured = window.__orcaBlobs && window.__orcaBlobs[blobUrl];"
+                + "if (captured) return captured;"
                 + "try {"
                 + "const blobResponse = await fetch(blobUrl);"
                 + "if (!blobResponse.ok) throw new Error('fetch status ' + blobResponse.status);"
@@ -216,7 +243,8 @@ public class MainActivity extends Activity {
                 + "OrcaBlobBridge.finishBlob(transferId);"
                 + "return JSON.stringify({ ok: true });"
                 + "} catch (error) {"
-                + "OrcaBlobBridge.failBlob(" + JSONObject.quote(transferId) + ", String(error));"
+                + "const capturedKeys = window.__orcaBlobs ? Object.keys(window.__orcaBlobs).length : 0;"
+                + "OrcaBlobBridge.failBlob(" + JSONObject.quote(transferId) + ", String(error) + '; captured blobs=' + capturedKeys);"
                 + "return JSON.stringify({ ok: false, error: String(error) });"
                 + "}"
                 + "})()";
