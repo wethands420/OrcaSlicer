@@ -794,6 +794,8 @@ endif ()
 
 if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
     add_precompiled_header(libslic3r_gui pchheader.hpp FORCEINCLUDE)
+elseif (MSVC AND NOT SLIC3R_SYNTAXONLY)
+    target_compile_options(libslic3r_gui PRIVATE /FI"${CMAKE_CURRENT_SOURCE_DIR}/pchheader.hpp")
 endif ()
 
 # We need to implement some hacks for wxWidgets and touch the underlying GTK

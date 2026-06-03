@@ -154,10 +154,12 @@ endif ()
 # Add the Slic3r GUI library, libcurl, OpenGL and GLU libraries.
 if (SLIC3R_GUI)
 #    target_link_libraries(OrcaSlicer ws2_32 uxtheme setupapi libslic3r_gui ${wxWidgets_LIBRARIES})
-target_link_libraries(OrcaSlicer libslic3r_gui)
-    if (MSVC)
-        # Generate debug symbols even in release mode.
+    target_link_libraries(OrcaSlicer libslic3r_gui)
+    if (MSVC AND SLIC3R_MSVC_PDB)
+        # Generate debug symbols even in release mode when explicitly enabled.
         target_link_options(OrcaSlicer PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
+    endif ()
+    if (MSVC)
         target_link_libraries(OrcaSlicer user32.lib Setupapi.lib)
     elseif (MINGW)
         target_link_libraries(OrcaSlicer ws2_32 uxtheme setupapi)
@@ -180,8 +182,8 @@ if (WIN32)
     endif()
 
     add_executable(OrcaSlicer_app_gui WIN32 OrcaSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/OrcaSlicer.rc)
-    # Generate debug symbols even in release mode.
-    if(MSVC)
+    # Generate debug symbols even in release mode when explicitly enabled.
+    if(MSVC AND SLIC3R_MSVC_PDB)
         target_link_options(OrcaSlicer_app_gui PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
     endif()
     target_compile_definitions(OrcaSlicer_app_gui PRIVATE -DSLIC3R_WRAPPER_NOCONSOLE)
