@@ -44,6 +44,11 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8787
 - `POST /api/v1/jobs/{job_id}/start-print`
 - `GET /api/v1/printer/status`
 - `POST /api/v1/printer/cancel`
+- `POST /api/v1/remote-downloads`
+- `GET /api/v1/remote-downloads/{download_id}`
+- `POST /api/v1/remote-downloads/{download_id}/inspect`
+- `POST /api/v1/imports`
+- `GET /api/v1/imports`
 
 Optional multipart field `cli_args` may contain a JSON array of extra OrcaSlicer
 CLI arguments. The service appends `--outputdir <job-output-dir> <uploaded-file>`.
@@ -84,6 +89,34 @@ Workflow:
    `project_file` MQTT command.
 5. `POST /api/v1/printer/cancel` sends the Orca-compatible `print.stop`
    command.
+
+## Remote website downloads
+
+The mobile app can browse model websites in an Android WebView while the VM
+performs the actual download. The phone sends the intercepted download URL,
+filename, MIME type, user agent, and cookies to:
+
+```http
+POST /api/v1/remote-downloads
+```
+
+The service downloads into `ORCA_SERVICE_DATA_DIR/remote-downloads`, not onto the
+phone. After completion, call:
+
+```http
+POST /api/v1/remote-downloads/{download_id}/inspect
+```
+
+Supported direct imports are STL, OBJ, STEP/STP, SVG, 3MF, and AMF. ZIP files are
+inspected without extracting unsafe paths; the client must choose a supported
+entry and then call:
+
+```http
+POST /api/v1/imports
+```
+
+Set `"debug_log_cookies": true` in the download request to write the raw cookie
+header beside the VM download job for debugging.
 
 ## Notes
 

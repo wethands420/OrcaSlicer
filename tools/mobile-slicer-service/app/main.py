@@ -12,11 +12,15 @@ import struct
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
+import zipfile
 from dataclasses import asdict, dataclass, field
 from ftplib import FTP_TLS
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -24,6 +28,10 @@ from pydantic import BaseModel
 
 
 JobState = Literal["queued", "running", "succeeded", "failed"]
+ImportType = Literal["geometry", "project_or_geometry", "archive"]
+SUPPORTED_GEOMETRY_SUFFIXES = {".stl", ".obj", ".step", ".stp", ".svg"}
+SUPPORTED_PROJECT_SUFFIXES = {".3mf", ".amf"}
+SUPPORTED_ARCHIVE_SUFFIXES = {".zip"}
 
 
 def _data_dir() -> Path:
@@ -88,6 +96,48 @@ class PreparedPrint:
     uploaded_at: float | None = None
 
 
+@dataclass
+class RemoteDownloadJob:
+    id: str
+    url: str
+    filename: str
+    output_dir: str
+    status: JobState = "queued"
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    path: str | None = None
+    size: int | None = None
+    mime_type: str | None = None
+    error: str | None = None
+
+
+@dataclass
+class ImportedModel:
+    id: str
+    filename: str
+    path: str
+    import_type: str
+    source_download_id: str
+    source_entry_path: str | None = None
+    created_at: float = field(default_factory=time.time)
+
+
+class RemoteDownloadRequest(BaseModel):
+    url: str
+    filename: str | None = None
+    mime_type: str | None = None
+    user_agent: str | None = None
+    cookie_header: str | None = None
+    referer: str | None = None
+    extra_headers: dict[str, str] = {}
+    debug_log_cookies: bool = False
+
+
+class ImportRequest(BaseModel):
+    download_id: str
+    entry_path: str | None = None
+
+
 class PrinterStartRequest(BaseModel):
     prepared_filename: str | None = None
     timelapse: bool = False
@@ -118,6 +168,8 @@ class ImplicitFTP_TLS(FTP_TLS):
 app = FastAPI(title="OrcaSlicer Mobile Slicer Service", version="0.1.0")
 jobs: dict[str, SliceJob] = {}
 prepared_prints: dict[str, PreparedPrint] = {}
+remote_downloads: dict[str, RemoteDownloadJob] = {}
+imported_models: dict[str, ImportedModel] = {}
 job_queue: queue.Queue[str] = queue.Queue()
 
 
@@ -127,6 +179,14 @@ def _job_dir(job_id: str) -> Path:
 
 def _prepared_print_path(job_id: str) -> Path:
     return _job_dir(job_id) / "print" / f"{job_id}.gcode.3mf"
+
+
+def _remote_download_dir(download_id: str) -> Path:
+    return _data_dir() / "remote-downloads" / download_id
+
+
+def _imports_dir() -> Path:
+    return _data_dir() / "imports"
 
 
 def _set_status(job: SliceJob, status: JobState, error: str | None = None) -> None:
@@ -159,6 +219,120 @@ def _find_output_file(output_dir: Path) -> Path | None:
             if path.name.lower().endswith(suffix):
                 return path
     return files[0] if files else None
+
+
+def _detect_import_type(path: Path) -> ImportType | None:
+    suffix = path.suffix.lower()
+    if suffix in SUPPORTED_GEOMETRY_SUFFIXES:
+        return "geometry"
+    if suffix in SUPPORTED_PROJECT_SUFFIXES:
+        return "project_or_geometry"
+    if suffix in SUPPORTED_ARCHIVE_SUFFIXES:
+        return "archive"
+    return None
+
+
+def _is_safe_zip_member(name: str) -> bool:
+    entry = Path(name)
+    return bool(name) and not entry.is_absolute() and ".." not in entry.parts
+
+
+def _inspect_download_file(path: Path) -> dict[str, Any]:
+    import_type = _detect_import_type(path)
+    if not import_type:
+        return {
+            "kind": "unsupported",
+            "filename": path.name,
+            "size": path.stat().st_size,
+            "supported_entries": [],
+        }
+
+    if import_type != "archive":
+        return {
+            "kind": import_type,
+            "filename": path.name,
+            "size": path.stat().st_size,
+            "supported_entries": [
+                {"path": path.name, "filename": path.name, "import_type": import_type, "size": path.stat().st_size}
+            ],
+        }
+
+    supported_entries: list[dict[str, Any]] = []
+    with zipfile.ZipFile(path) as archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            if not _is_safe_zip_member(info.filename):
+                raise ValueError(f"unsafe zip entry: {info.filename}")
+            entry_type = _detect_import_type(Path(info.filename))
+            if entry_type and entry_type != "archive":
+                supported_entries.append(
+                    {
+                        "path": info.filename,
+                        "filename": Path(info.filename).name,
+                        "import_type": entry_type,
+                        "size": info.file_size,
+                    }
+                )
+
+    return {
+        "kind": "archive",
+        "filename": path.name,
+        "size": path.stat().st_size,
+        "supported_entries": supported_entries,
+    }
+
+
+def _max_remote_download_bytes() -> int:
+    return int(os.environ.get("ORCA_SERVICE_MAX_REMOTE_DOWNLOAD_BYTES", str(512 * 1024 * 1024)))
+
+
+def _download_remote_file(download_id: str, request: RemoteDownloadRequest) -> None:
+    job = remote_downloads[download_id]
+    target_dir = Path(job.output_dir)
+    tmp_path = target_dir / f"{job.filename}.download"
+    final_path = target_dir / job.filename
+    headers = dict(request.extra_headers)
+    if request.user_agent:
+        headers["User-Agent"] = request.user_agent
+    if request.cookie_header:
+        headers["Cookie"] = request.cookie_header
+    if request.referer:
+        headers["Referer"] = request.referer
+
+    try:
+        _set_download_status(job, "running")
+        if request.debug_log_cookies and request.cookie_header:
+            (target_dir / "cookies.log").write_text(request.cookie_header, encoding="utf-8")
+
+        req = urllib.request.Request(request.url, headers=headers)
+        max_bytes = _max_remote_download_bytes()
+        written = 0
+        with urllib.request.urlopen(req, timeout=60) as response, tmp_path.open("wb") as target:
+            job.mime_type = request.mime_type or response.headers.get_content_type()
+            while True:
+                chunk = response.read(1024 * 256)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise ValueError(f"download exceeds limit of {max_bytes} bytes")
+                target.write(chunk)
+
+        tmp_path.replace(final_path)
+        job.path = str(final_path)
+        job.size = final_path.stat().st_size
+        _set_download_status(job, "succeeded")
+    except Exception as exc:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        _set_download_status(job, "failed", str(exc))
+
+
+def _set_download_status(job: RemoteDownloadJob, status: JobState, error: str | None = None) -> None:
+    job.status = status
+    job.error = error
+    job.updated_at = time.time()
 
 
 def _printer_ip() -> str:
@@ -405,6 +579,8 @@ def _worker() -> None:
 @app.on_event("startup")
 def _startup() -> None:
     (_data_dir() / "jobs").mkdir(parents=True, exist_ok=True)
+    (_data_dir() / "remote-downloads").mkdir(parents=True, exist_ok=True)
+    _imports_dir().mkdir(parents=True, exist_ok=True)
     thread = threading.Thread(target=_worker, name="orcaslicer-job-worker", daemon=True)
     thread.start()
 
@@ -469,6 +645,104 @@ def get_output(job_id: str) -> FileResponse:
     if not output:
         raise HTTPException(status_code=404, detail="output file not found")
     return FileResponse(output, filename=output.name)
+
+
+@app.post("/api/v1/remote-downloads")
+def create_remote_download(request: RemoteDownloadRequest) -> dict[str, object]:
+    download_id = str(uuid.uuid4())
+    output_dir = _remote_download_dir(download_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = _safe_name(request.filename or Path(urllib.parse.urlparse(request.url).path).name or "download.model")
+    job = RemoteDownloadJob(
+        id=download_id,
+        url=request.url,
+        filename=filename,
+        output_dir=str(output_dir),
+        mime_type=request.mime_type,
+    )
+    remote_downloads[download_id] = job
+    thread = threading.Thread(
+        target=_download_remote_file,
+        args=(download_id, request),
+        name=f"remote-download-{download_id}",
+        daemon=True,
+    )
+    thread.start()
+    return {"download": asdict(job)}
+
+
+@app.get("/api/v1/remote-downloads/{download_id}")
+def get_remote_download(download_id: str) -> dict[str, object]:
+    job = remote_downloads.get(download_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="download not found")
+    result = asdict(job)
+    result["inspect_ready"] = job.status == "succeeded" and job.path is not None
+    return {"download": result}
+
+
+@app.post("/api/v1/remote-downloads/{download_id}/inspect")
+def inspect_remote_download(download_id: str) -> dict[str, object]:
+    job = remote_downloads.get(download_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="download not found")
+    if job.status != "succeeded" or not job.path:
+        raise HTTPException(status_code=409, detail=f"download is {job.status}")
+    try:
+        inspection = _inspect_download_file(Path(job.path))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"download": asdict(job), "inspection": inspection}
+
+
+@app.post("/api/v1/imports")
+def create_import(request: ImportRequest) -> dict[str, object]:
+    download = remote_downloads.get(request.download_id)
+    if not download:
+        raise HTTPException(status_code=404, detail="download not found")
+    if download.status != "succeeded" or not download.path:
+        raise HTTPException(status_code=409, detail=f"download is {download.status}")
+
+    source_path = Path(download.path)
+    model_id = str(uuid.uuid4())
+    target_dir = _imports_dir() / model_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    if request.entry_path:
+        with zipfile.ZipFile(source_path) as archive:
+            if not _is_safe_zip_member(request.entry_path):
+                raise HTTPException(status_code=400, detail="unsafe zip entry")
+            info = archive.getinfo(request.entry_path)
+            import_type = _detect_import_type(Path(info.filename))
+            if not import_type or import_type == "archive":
+                raise HTTPException(status_code=400, detail="unsupported zip entry")
+            target_path = target_dir / _safe_name(Path(info.filename).name)
+            with archive.open(info) as source, target_path.open("wb") as target:
+                shutil.copyfileobj(source, target)
+            source_entry_path = request.entry_path
+    else:
+        import_type = _detect_import_type(source_path)
+        if not import_type or import_type == "archive":
+            raise HTTPException(status_code=400, detail="download requires selecting a supported archive entry")
+        target_path = target_dir / _safe_name(source_path.name)
+        shutil.copy2(source_path, target_path)
+        source_entry_path = None
+
+    imported = ImportedModel(
+        id=model_id,
+        filename=target_path.name,
+        path=str(target_path),
+        import_type=import_type,
+        source_download_id=request.download_id,
+        source_entry_path=source_entry_path,
+    )
+    imported_models[model_id] = imported
+    return {"imported_model": asdict(imported)}
+
+
+@app.get("/api/v1/imports")
+def list_imports() -> dict[str, object]:
+    return {"imported_models": [asdict(model) for model in imported_models.values()]}
 
 
 @app.post("/api/v1/jobs/{job_id}/prepare-print")
