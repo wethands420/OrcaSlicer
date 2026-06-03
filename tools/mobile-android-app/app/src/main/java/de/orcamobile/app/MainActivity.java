@@ -8,8 +8,10 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Base64;
 import android.view.View;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.URLUtil;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -23,13 +25,17 @@ import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.BufferedReader;
+import java.io.DataOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -42,6 +48,7 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private LinearLayout importList;
     private String lastDownloadId;
+    private final Map<String, PendingBlob> pendingBlobs = new HashMap<>();
 
     @Override
     @SuppressLint("SetJavaScriptEnabled")
@@ -88,6 +95,7 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
+        webView.addJavascriptInterface(new BlobBridge(), "OrcaBlobBridge");
         webView.setWebViewClient(new WebViewClient());
         webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
             String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
@@ -170,19 +178,25 @@ public class MainActivity extends Activity {
     private void startBlobRemoteDownload(String url, String filename, String mimeType) {
         setStatus("Browser-Download wird zur VM gesendet...");
         importList.removeAllViews();
+        String transferId = "blob-" + System.currentTimeMillis();
         String script = "(async () => {"
                 + "try {"
+                + "const transferId = " + JSONObject.quote(transferId) + ";"
+                + "OrcaBlobBridge.startBlob(transferId, " + JSONObject.quote(filename) + ", " + JSONObject.quote(mimeType == null ? "" : mimeType) + ", " + JSONObject.quote(url) + ", location.href);"
                 + "const blobResponse = await fetch(" + JSONObject.quote(url) + ");"
                 + "const blob = await blobResponse.blob();"
-                + "const form = new FormData();"
-                + "form.append('file', blob, " + JSONObject.quote(filename) + ");"
-                + "form.append('source_url', " + JSONObject.quote(url) + ");"
-                + "form.append('mime_type', " + JSONObject.quote(mimeType == null ? "" : mimeType) + ");"
-                + "form.append('referer', location.href);"
-                + "const upload = await fetch(" + JSONObject.quote(serverBase() + "/api/v1/remote-download-uploads") + ", { method: 'POST', body: form });"
-                + "const body = await upload.text();"
-                + "return JSON.stringify({ ok: upload.ok, status: upload.status, body: body });"
+                + "const bytes = new Uint8Array(await blob.arrayBuffer());"
+                + "const chunkSize = 32768;"
+                + "for (let offset = 0; offset < bytes.length; offset += chunkSize) {"
+                + "let binary = '';"
+                + "const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));"
+                + "for (let i = 0; i < chunk.length; i++) binary += String.fromCharCode(chunk[i]);"
+                + "OrcaBlobBridge.appendBlobChunk(transferId, btoa(binary));"
+                + "}"
+                + "OrcaBlobBridge.finishBlob(transferId);"
+                + "return JSON.stringify({ ok: true });"
                 + "} catch (error) {"
+                + "OrcaBlobBridge.failBlob(" + JSONObject.quote(transferId) + ", String(error));"
                 + "return JSON.stringify({ ok: false, error: String(error) });"
                 + "}"
                 + "})()";
@@ -191,20 +205,30 @@ public class MainActivity extends Activity {
             try {
                 JSONObject result = new JSONObject(unquoteJavascriptString(value));
                 if (!result.optBoolean("ok")) {
-                    setStatus("Blob-Upload fehlgeschlagen: " + result.optString("error", result.optString("body")));
-                    return;
+                    setStatus("Blob konnte nicht gelesen werden: " + result.optString("error"));
                 }
-                JSONObject response = new JSONObject(result.getString("body"));
-                lastDownloadId = response.getJSONObject("download").getString("id");
-                executor.submit(() -> {
-                    try {
-                        inspectDownload();
-                    } catch (Exception e) {
-                        setStatus("Import-Prüfung fehlgeschlagen: " + e.getMessage());
-                    }
-                });
             } catch (Exception e) {
-                setStatus("Blob-Upload konnte nicht ausgewertet werden: " + e.getMessage());
+                setStatus("Blob-Lesen konnte nicht ausgewertet werden: " + e.getMessage());
+            }
+        });
+    }
+
+    private void uploadBlobToVm(PendingBlob pending) {
+        executor.submit(() -> {
+            try {
+                setStatus("Blob wird nativ zur VM hochgeladen...");
+                JSONObject response = postMultipartUpload(
+                        "/api/v1/remote-download-uploads",
+                        pending.filename,
+                        pending.mimeType,
+                        pending.sourceUrl,
+                        pending.referer,
+                        pending.data.toByteArray()
+                );
+                lastDownloadId = response.getJSONObject("download").getString("id");
+                inspectDownload();
+            } catch (Exception e) {
+                setStatus("Blob-Upload fehlgeschlagen: " + e.getMessage());
             }
         });
     }
@@ -307,6 +331,32 @@ public class MainActivity extends Activity {
         return readJson(connection);
     }
 
+    private JSONObject postMultipartUpload(String path, String filename, String mimeType, String sourceUrl, String referer, byte[] data) throws Exception {
+        String boundary = "----OrcaMobile" + System.currentTimeMillis();
+        HttpURLConnection connection = (HttpURLConnection) new URL(serverBase() + path).openConnection();
+        connection.setRequestMethod("POST");
+        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        connection.setDoOutput(true);
+        try (DataOutputStream stream = new DataOutputStream(connection.getOutputStream())) {
+            writeMultipartField(stream, boundary, "source_url", sourceUrl);
+            writeMultipartField(stream, boundary, "mime_type", mimeType == null ? "" : mimeType);
+            writeMultipartField(stream, boundary, "referer", referer == null ? "" : referer);
+            stream.writeBytes("--" + boundary + "\r\n");
+            stream.writeBytes("Content-Disposition: form-data; name=\"file\"; filename=\"" + filename.replace("\"", "_") + "\"\r\n");
+            stream.writeBytes("Content-Type: " + (mimeType == null || mimeType.isEmpty() ? "application/octet-stream" : mimeType) + "\r\n\r\n");
+            stream.write(data);
+            stream.writeBytes("\r\n--" + boundary + "--\r\n");
+        }
+        return readJson(connection);
+    }
+
+    private void writeMultipartField(DataOutputStream stream, String boundary, String name, String value) throws Exception {
+        stream.writeBytes("--" + boundary + "\r\n");
+        stream.writeBytes("Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n");
+        stream.write(value == null ? new byte[0] : value.getBytes(StandardCharsets.UTF_8));
+        stream.writeBytes("\r\n");
+    }
+
     private JSONObject readJson(HttpURLConnection connection) throws Exception {
         int code = connection.getResponseCode();
         InputStream stream = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
@@ -336,5 +386,59 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         executor.shutdownNow();
         super.onDestroy();
+    }
+
+    private static class PendingBlob {
+        final String filename;
+        final String mimeType;
+        final String sourceUrl;
+        final String referer;
+        final ByteArrayOutputStream data = new ByteArrayOutputStream();
+
+        PendingBlob(String filename, String mimeType, String sourceUrl, String referer) {
+            this.filename = filename;
+            this.mimeType = mimeType;
+            this.sourceUrl = sourceUrl;
+            this.referer = referer;
+        }
+    }
+
+    private class BlobBridge {
+        @JavascriptInterface
+        public void startBlob(String id, String filename, String mimeType, String sourceUrl, String referer) {
+            synchronized (pendingBlobs) {
+                pendingBlobs.put(id, new PendingBlob(filename, mimeType, sourceUrl, referer));
+            }
+        }
+
+        @JavascriptInterface
+        public void appendBlobChunk(String id, String base64Chunk) {
+            byte[] chunk = Base64.decode(base64Chunk, Base64.DEFAULT);
+            synchronized (pendingBlobs) {
+                PendingBlob pending = pendingBlobs.get(id);
+                if (pending != null) {
+                    pending.data.write(chunk, 0, chunk.length);
+                }
+            }
+        }
+
+        @JavascriptInterface
+        public void finishBlob(String id) {
+            PendingBlob pending;
+            synchronized (pendingBlobs) {
+                pending = pendingBlobs.remove(id);
+            }
+            if (pending != null) {
+                uploadBlobToVm(pending);
+            }
+        }
+
+        @JavascriptInterface
+        public void failBlob(String id, String error) {
+            synchronized (pendingBlobs) {
+                pendingBlobs.remove(id);
+            }
+            setStatus("Blob konnte nicht gelesen werden: " + error);
+        }
     }
 }
