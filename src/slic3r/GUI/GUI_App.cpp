@@ -4610,6 +4610,12 @@ std::string GUI_App::handle_web_request(std::string cmd)
             else if (command_str.compare("homepage_modeldepot") == 0) {
                 CallAfter([this] { open_mall_page_dialog(); });
             }
+            else if (command_str.compare("homepage_model_browser") == 0) {
+                CallAfter([this] {
+                    if (mainframe)
+                        mainframe->show_model_browser();
+                });
+            }
             else if (command_str.compare("homepage_newproject") == 0) {
                 this->request_open_project("<new>");
             }

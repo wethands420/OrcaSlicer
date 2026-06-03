@@ -51,7 +51,7 @@ class Tab;
 class PrintHostQueueDialog;
 class Plater;
 class MainFrame;
-class ModelBrowserDialog;
+class ModelBrowserPanel;
 class ParamsDialog;
 #ifdef __WXGTK__
 class ResizeEdgePanel;
@@ -293,6 +293,7 @@ public:
     //BBS
     void        show_log_window();
     void        show_model_browser();
+    void        show_home_page();
 
     void        update_ui_from_settings();
     //BBS
@@ -385,8 +386,9 @@ public:
     ProjectPanel*         m_project{ nullptr };
 
     CalibrationPanel*     m_calibration{ nullptr };
+    wxPanel*              m_home_panel{ nullptr };
     WebViewPanel*         m_webview { nullptr };
-    ModelBrowserDialog*   m_model_browser{ nullptr };
+    ModelBrowserPanel*    m_model_browser{ nullptr };
     PrinterWebView*       m_printer_view{nullptr};
     wxLogWindow*          m_log_window { nullptr };
     // BBS

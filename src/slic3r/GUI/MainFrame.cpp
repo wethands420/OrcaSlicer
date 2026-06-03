@@ -951,11 +951,26 @@ void  MainFrame::show_log_window()
 
 void MainFrame::show_model_browser()
 {
-    if (m_model_browser == nullptr)
-        m_model_browser = new ModelBrowserDialog(this, m_plater);
+    if (m_tabpanel == nullptr || m_model_browser == nullptr)
+        return;
 
+    select_tab(MainFrame::tpHome);
+    if (m_webview)
+        m_webview->Hide();
     m_model_browser->Show();
     m_model_browser->Raise();
+    if (m_home_panel)
+        m_home_panel->Layout();
+}
+
+void MainFrame::show_home_page()
+{
+    if (m_model_browser)
+        m_model_browser->Hide();
+    if (m_webview)
+        m_webview->Show();
+    if (m_home_panel)
+        m_home_panel->Layout();
 }
 
 //BBS GUI refactor: remove unused layout new/dlg
@@ -1320,13 +1335,19 @@ void MainFrame::init_tabpanel() {
     });
 
     if (wxGetApp().is_editor()) {
-        m_webview         = new WebViewPanel(m_tabpanel);
+        m_home_panel = new wxPanel(m_tabpanel, wxID_ANY);
+        auto* home_sizer = new wxBoxSizer(wxVERTICAL);
+        m_home_panel->SetSizer(home_sizer);
+
+        m_webview = new WebViewPanel(m_home_panel);
+        home_sizer->Add(m_webview, 1, wxEXPAND, 0);
         Bind(EVT_LOAD_URL, [this](wxCommandEvent &evt) {
             wxString url = evt.GetString();
             select_tab(MainFrame::tpHome);
+            show_home_page();
             m_webview->load_url(url);
         });
-        m_tabpanel->AddPage(m_webview, "", "tab_home_active", "tab_home_active", false);
+        m_tabpanel->AddPage(m_home_panel, "", "tab_home_active", "tab_home_active", false);
         m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
     }
 
@@ -1335,6 +1356,14 @@ void MainFrame::init_tabpanel() {
     m_plater->Hide();
 
     wxGetApp().plater_ = m_plater;
+
+    if (m_home_panel != nullptr) {
+        m_model_browser = new ModelBrowserPanel(m_home_panel, m_plater);
+        m_model_browser->set_return_to_home_callback([this]() { show_home_page(); });
+        m_home_panel->GetSizer()->Add(m_model_browser, 1, wxEXPAND, 0);
+        m_model_browser->Hide();
+        m_home_panel->Layout();
+    }
 
     create_preset_tabs();
 
