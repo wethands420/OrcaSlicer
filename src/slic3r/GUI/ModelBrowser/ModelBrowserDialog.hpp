@@ -5,7 +5,6 @@
 #include "slic3r/GUI/GUI_Utils.hpp"
 
 #include <boost/filesystem/path.hpp>
-#include <functional>
 #include <memory>
 #include <vector>
 
@@ -32,7 +31,6 @@ public:
     ~ModelBrowserPanel() override;
 
     void load_url(const wxString& url);
-    void set_return_to_home_callback(std::function<void()> callback);
 
 private:
     void build_toolbar(wxBoxSizer* parent_sizer);
@@ -54,7 +52,6 @@ private:
     void on_back(wxCommandEvent& event);
     void on_forward(wxCommandEvent& event);
     void on_reload(wxCommandEvent& event);
-    void on_return_home(wxCommandEvent& event);
     void on_open_external(wxCommandEvent& event);
     void on_download_current(wxCommandEvent& event);
     void on_navigation_request(wxWebViewEvent& event);
@@ -76,7 +73,6 @@ private:
 #endif
 
     Plater* m_plater{nullptr};
-    std::function<void()> m_return_to_home_callback;
     wxWebView* m_browser{nullptr};
     wxChoice* m_site_choice{nullptr};
     wxTextCtrl* m_address{nullptr};

@@ -1303,6 +1303,9 @@ void MainFrame::init_tabpanel() {
         else if (panel == m_monitor) {
             //monitor
         }
+        else if (sel == tpHome) {
+            show_home_page();
+        }
 #ifndef __APPLE__
         if (sel == tp3DEditor) {
             m_topbar->EnableUndoRedoItems();
@@ -1359,7 +1362,6 @@ void MainFrame::init_tabpanel() {
 
     if (m_home_panel != nullptr) {
         m_model_browser = new ModelBrowserPanel(m_home_panel, m_plater);
-        m_model_browser->set_return_to_home_callback([this]() { show_home_page(); });
         m_home_panel->GetSizer()->Add(m_model_browser, 1, wxEXPAND, 0);
         m_model_browser->Hide();
         m_home_panel->Layout();

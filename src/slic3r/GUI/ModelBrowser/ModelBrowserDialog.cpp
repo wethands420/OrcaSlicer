@@ -14,7 +14,6 @@
 #include <boost/log/trivial.hpp>
 
 #include <exception>
-#include <utility>
 #include <vector>
 
 #include <wx/button.h>
@@ -163,16 +162,10 @@ ModelBrowserPanel::~ModelBrowserPanel()
 #endif
 }
 
-void ModelBrowserPanel::set_return_to_home_callback(std::function<void()> callback)
-{
-    m_return_to_home_callback = std::move(callback);
-}
-
 void ModelBrowserPanel::build_toolbar(wxBoxSizer* parent_sizer)
 {
     wxBoxSizer* toolbar = new wxBoxSizer(wxHORIZONTAL);
 
-    auto* home = new wxButton(this, wxID_ANY, _L("Home"));
     auto* back = new wxButton(this, wxID_ANY, "<");
     auto* forward = new wxButton(this, wxID_ANY, ">");
     auto* reload = new wxButton(this, wxID_ANY, _L("Reload"));
@@ -187,7 +180,6 @@ void ModelBrowserPanel::build_toolbar(wxBoxSizer* parent_sizer)
         m_site_choice->Append(from_u8(site.label));
     m_site_choice->SetSelection(0);
 
-    toolbar->Add(home, 0, wxALL, 4);
     toolbar->Add(back, 0, wxALL, 4);
     toolbar->Add(forward, 0, wxALL, 4);
     toolbar->Add(reload, 0, wxALL, 4);
@@ -207,7 +199,6 @@ void ModelBrowserPanel::build_toolbar(wxBoxSizer* parent_sizer)
     m_site_choice->Bind(wxEVT_CHOICE, &ModelBrowserPanel::on_site_selected, this);
     m_address->Bind(wxEVT_TEXT_ENTER, &ModelBrowserPanel::on_address_enter, this);
     go->Bind(wxEVT_BUTTON, &ModelBrowserPanel::on_address_enter, this);
-    home->Bind(wxEVT_BUTTON, &ModelBrowserPanel::on_return_home, this);
     back->Bind(wxEVT_BUTTON, &ModelBrowserPanel::on_back, this);
     forward->Bind(wxEVT_BUTTON, &ModelBrowserPanel::on_forward, this);
     reload->Bind(wxEVT_BUTTON, &ModelBrowserPanel::on_reload, this);
@@ -298,12 +289,6 @@ void ModelBrowserPanel::on_reload(wxCommandEvent& /*event*/)
 {
     if (m_browser)
         m_browser->Reload();
-}
-
-void ModelBrowserPanel::on_return_home(wxCommandEvent& /*event*/)
-{
-    if (m_return_to_home_callback)
-        m_return_to_home_callback();
 }
 
 void ModelBrowserPanel::on_open_external(wxCommandEvent& /*event*/)
