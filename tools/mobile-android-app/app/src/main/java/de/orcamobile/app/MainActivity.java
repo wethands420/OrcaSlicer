@@ -99,6 +99,10 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient());
         webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
             String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
+            if (url.startsWith("blob:")) {
+                startBlobRemoteDownload(url, fileName, mimeType);
+                return;
+            }
             String cookies = CookieManager.getInstance().getCookie(url);
             confirmRemoteDownload(url, fileName, mimeType, userAgent, cookies);
         });
@@ -183,9 +187,25 @@ public class MainActivity extends Activity {
                 + "try {"
                 + "const transferId = " + JSONObject.quote(transferId) + ";"
                 + "OrcaBlobBridge.startBlob(transferId, " + JSONObject.quote(filename) + ", " + JSONObject.quote(mimeType == null ? "" : mimeType) + ", " + JSONObject.quote(url) + ", location.href);"
-                + "const blobResponse = await fetch(" + JSONObject.quote(url) + ");"
-                + "const blob = await blobResponse.blob();"
+                + "async function readBlob(blobUrl) {"
+                + "try {"
+                + "const blobResponse = await fetch(blobUrl);"
+                + "if (!blobResponse.ok) throw new Error('fetch status ' + blobResponse.status);"
+                + "return await blobResponse.blob();"
+                + "} catch (fetchError) {"
+                + "return await new Promise((resolve, reject) => {"
+                + "const xhr = new XMLHttpRequest();"
+                + "xhr.open('GET', blobUrl);"
+                + "xhr.responseType = 'blob';"
+                + "xhr.onload = () => xhr.status === 200 || xhr.status === 0 ? resolve(xhr.response) : reject(new Error('xhr status ' + xhr.status));"
+                + "xhr.onerror = () => reject(new Error('fetch failed: ' + fetchError + '; xhr failed'));"
+                + "xhr.send();"
+                + "});"
+                + "}"
+                + "}"
+                + "const blob = await readBlob(" + JSONObject.quote(url) + ");"
                 + "const bytes = new Uint8Array(await blob.arrayBuffer());"
+                + "if (bytes.length === 0) throw new Error('blob is empty');"
                 + "const chunkSize = 32768;"
                 + "for (let offset = 0; offset < bytes.length; offset += chunkSize) {"
                 + "let binary = '';"
