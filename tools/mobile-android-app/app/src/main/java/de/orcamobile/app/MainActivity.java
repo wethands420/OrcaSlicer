@@ -122,7 +122,13 @@ public class MainActivity extends Activity {
                 .setTitle("Auf VM herunterladen?")
                 .setMessage(filename + "\n\nDie Datei wird nicht auf dem Handy gespeichert.")
                 .setNegativeButton("Abbrechen", null)
-                .setPositiveButton("VM Download", (dialog, which) -> startRemoteDownload(url, filename, mimeType, userAgent, cookies))
+                .setPositiveButton("VM Download", (dialog, which) -> {
+                    if (url.startsWith("blob:")) {
+                        startBlobRemoteDownload(url, filename, mimeType);
+                    } else {
+                        startRemoteDownload(url, filename, mimeType, userAgent, cookies);
+                    }
+                })
                 .show();
     }
 
@@ -159,6 +165,55 @@ public class MainActivity extends Activity {
                 setStatus("Download konnte nicht gestartet werden: " + e.getMessage());
             }
         });
+    }
+
+    private void startBlobRemoteDownload(String url, String filename, String mimeType) {
+        setStatus("Browser-Download wird zur VM gesendet...");
+        importList.removeAllViews();
+        String script = "(async () => {"
+                + "try {"
+                + "const blobResponse = await fetch(" + JSONObject.quote(url) + ");"
+                + "const blob = await blobResponse.blob();"
+                + "const form = new FormData();"
+                + "form.append('file', blob, " + JSONObject.quote(filename) + ");"
+                + "form.append('source_url', " + JSONObject.quote(url) + ");"
+                + "form.append('mime_type', " + JSONObject.quote(mimeType == null ? "" : mimeType) + ");"
+                + "form.append('referer', location.href);"
+                + "const upload = await fetch(" + JSONObject.quote(serverBase() + "/api/v1/remote-download-uploads") + ", { method: 'POST', body: form });"
+                + "const body = await upload.text();"
+                + "return JSON.stringify({ ok: upload.ok, status: upload.status, body: body });"
+                + "} catch (error) {"
+                + "return JSON.stringify({ ok: false, error: String(error) });"
+                + "}"
+                + "})()";
+
+        webView.evaluateJavascript(script, value -> {
+            try {
+                JSONObject result = new JSONObject(unquoteJavascriptString(value));
+                if (!result.optBoolean("ok")) {
+                    setStatus("Blob-Upload fehlgeschlagen: " + result.optString("error", result.optString("body")));
+                    return;
+                }
+                JSONObject response = new JSONObject(result.getString("body"));
+                lastDownloadId = response.getJSONObject("download").getString("id");
+                executor.submit(() -> {
+                    try {
+                        inspectDownload();
+                    } catch (Exception e) {
+                        setStatus("Import-Prüfung fehlgeschlagen: " + e.getMessage());
+                    }
+                });
+            } catch (Exception e) {
+                setStatus("Blob-Upload konnte nicht ausgewertet werden: " + e.getMessage());
+            }
+        });
+    }
+
+    private String unquoteJavascriptString(String value) throws Exception {
+        if (value == null || "null".equals(value)) {
+            return "";
+        }
+        return new JSONArray("[" + value + "]").getString(0);
     }
 
     private void pollDownload() throws Exception {

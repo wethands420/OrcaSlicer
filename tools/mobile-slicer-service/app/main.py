@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -166,6 +167,12 @@ class ImplicitFTP_TLS(FTP_TLS):
 
 
 app = FastAPI(title="OrcaSlicer Mobile Slicer Service", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 jobs: dict[str, SliceJob] = {}
 prepared_prints: dict[str, PreparedPrint] = {}
 remote_downloads: dict[str, RemoteDownloadJob] = {}
@@ -752,6 +759,54 @@ def create_remote_download(request: RemoteDownloadRequest) -> dict[str, object]:
         daemon=True,
     )
     thread.start()
+    return {"download": asdict(job)}
+
+
+@app.post("/api/v1/remote-download-uploads")
+async def create_remote_download_upload(
+    file: UploadFile = File(...),
+    source_url: str = Form(default=""),
+    mime_type: str | None = Form(default=None),
+    referer: str | None = Form(default=None),
+) -> dict[str, object]:
+    download_id = str(uuid.uuid4())
+    output_dir = _remote_download_dir(download_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = _safe_name(file.filename or "download.model")
+    final_path = output_dir / filename
+    with final_path.open("wb") as target:
+        shutil.copyfileobj(file.file, target)
+
+    job = RemoteDownloadJob(
+        id=download_id,
+        url=source_url,
+        filename=filename,
+        output_dir=str(output_dir),
+        status="succeeded",
+        path=str(final_path),
+        size=final_path.stat().st_size,
+        mime_type=mime_type or file.content_type,
+    )
+    remote_downloads[download_id] = job
+    (output_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "request": {
+                    "url": source_url,
+                    "filename": filename,
+                    "mime_type": mime_type,
+                    "referer": referer,
+                    "transport": "webview_blob_upload",
+                },
+                "response": {
+                    "content_type": file.content_type,
+                    "content_length": job.size,
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     return {"download": asdict(job)}
 
 
