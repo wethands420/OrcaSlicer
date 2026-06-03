@@ -141,6 +141,7 @@ public class MainActivity extends Activity {
     private void startRemoteDownload(String url, String filename, String mimeType, String userAgent, String cookies) {
         setStatus("Download wird auf der VM gestartet...");
         importList.removeAllViews();
+        String referer = webView.getUrl() == null ? "" : webView.getUrl();
         executor.submit(() -> {
             try {
                 JSONObject body = new JSONObject();
@@ -149,7 +150,7 @@ public class MainActivity extends Activity {
                 body.put("mime_type", mimeType);
                 body.put("user_agent", userAgent);
                 body.put("cookie_header", cookies == null ? "" : cookies);
-                body.put("referer", webView.getUrl() == null ? "" : webView.getUrl());
+                body.put("referer", referer);
                 body.put("debug_log_cookies", true);
                 JSONObject response = postJson("/api/v1/remote-downloads", body);
                 lastDownloadId = response.getJSONObject("download").getString("id");
