@@ -333,6 +333,23 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
     g_webviews.push_back(webView);
     return webView;
 }
+
+bool WebView::SetUserAgent(wxWebView* webView, wxString const& userAgent)
+{
+    if (!webView)
+        return false;
+
+#ifdef __WIN32__
+    if (auto* edge = dynamic_cast<WebViewEdge*>(webView))
+        return edge->SetUserAgent(userAgent);
+#else
+    webView->SetUserAgent(userAgent);
+    return true;
+#endif
+
+    return false;
+}
+
 #if wxUSE_WEBVIEW_EDGE
 bool WebView::CheckWebViewRuntime()
 {

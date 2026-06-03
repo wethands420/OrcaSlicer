@@ -7,6 +7,7 @@ class WebView
 {
 public:
     static wxWebView *CreateWebView(wxWindow *parent, wxString const &url);
+    static bool SetUserAgent(wxWebView *webView, wxString const &userAgent);
 #if wxUSE_WEBVIEW_EDGE
     static bool CheckWebViewRuntime();
     static bool DownloadAndInstallWebViewRuntime();

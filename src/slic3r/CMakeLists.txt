@@ -315,6 +315,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/MediaPlayCtrl.h
     GUI/MeshUtils.cpp
     GUI/MeshUtils.hpp
+    GUI/ModelBrowser/ModelBrowserDialog.cpp
+    GUI/ModelBrowser/ModelBrowserDialog.hpp
+    GUI/ModelBrowser/ModelBrowserFile.cpp
+    GUI/ModelBrowser/ModelBrowserFile.hpp
     GUI/ModelMall.cpp
     GUI/ModelMall.hpp
     GUI/MonitorBasePanel.cpp

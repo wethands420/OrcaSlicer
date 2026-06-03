@@ -59,6 +59,7 @@
 #include "GUI_ObjectList.hpp"
 #include "NotificationManager.hpp"
 #include "MarkdownTip.hpp"
+#include "ModelBrowser/ModelBrowserDialog.hpp"
 #include "NetworkTestDialog.hpp"
 #include "ConfigWizard.hpp"
 #include "Widgets/WebView.hpp"
@@ -948,6 +949,15 @@ void  MainFrame::show_log_window()
     m_log_window->Show();
 }
 
+void MainFrame::show_model_browser()
+{
+    if (m_model_browser == nullptr)
+        m_model_browser = new ModelBrowserDialog(this, m_plater);
+
+    m_model_browser->Show();
+    m_model_browser->Raise();
+}
+
 //BBS GUI refactor: remove unused layout new/dlg
 void MainFrame::update_layout()
 {
@@ -1146,6 +1156,11 @@ void MainFrame::shutdown()
     if (m_settings_dialog.IsShown())
         // call Close() to trigger call to lambda defined into GUI_App::persist_window_geometry()
         m_settings_dialog.Close();
+
+    if (m_model_browser != nullptr) {
+        m_model_browser->Destroy();
+        m_model_browser = nullptr;
+    }
 
     if (m_plater != nullptr) {
         // Stop the background thread (Windows and Linux).
@@ -2730,6 +2745,9 @@ void MainFrame::init_menubar_as_editor()
         append_menu_item(import_menu, wxID_ANY, _L("Import Zip Archive") + dots, _L("Load models contained within a zip archive"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->import_zip_archive(); }, "menu_import", nullptr,
             [this]() { return can_add_models(); });
+        append_menu_item(import_menu, wxID_ANY, _L("Browse 3D Models") + dots, _L("Browse 3D model websites and review downloads before importing"),
+            [this](wxCommandEvent&) { show_model_browser(); }, "menu_import", nullptr,
+            [this]() { return m_plater != nullptr; }, this);
         append_menu_item(import_menu, wxID_ANY, _L("Import Configs") + dots /*+ "\t" + ctrl + "I"*/, _L("Load configs"),
             [this](wxCommandEvent&) { load_config_file(); }, "menu_import", nullptr,
             [this](){return true; }, this);
