@@ -46,13 +46,13 @@ CLI arguments. The service appends `--outputdir <job-output-dir> <uploaded-file>
 Default CLI arguments are:
 
 ```json
-["--export-gcode"]
+["--slice", "0"]
 ```
 
 Override them with:
 
 ```bash
-export ORCA_SERVICE_DEFAULT_ARGS='["--export-gcode", "--load-settings", "/path/profile.json"]'
+export ORCA_SERVICE_DEFAULT_ARGS='--slice 0 --load-settings "/path/machine.json;/path/process.json" --load-filaments /path/filament.json'
 ```
 
 ## Notes

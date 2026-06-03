@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -34,10 +35,20 @@ def _orcaslicer_bin() -> str:
 def _default_args() -> list[str]:
     raw = os.environ.get("ORCA_SERVICE_DEFAULT_ARGS")
     if not raw:
-        return ["--export-gcode"]
-    parsed = json.loads(raw)
-    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
-        raise ValueError("ORCA_SERVICE_DEFAULT_ARGS must be a JSON array of strings")
+        return ["--slice", "0"]
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    stripped = raw.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        stripped = stripped[1:-1]
+    parsed = shlex.split(stripped.replace(",", " "))
+    if not parsed:
+        raise ValueError("ORCA_SERVICE_DEFAULT_ARGS must not be empty")
     return parsed
 
 
@@ -79,10 +90,17 @@ def _set_status(job: SliceJob, status: JobState, error: str | None = None) -> No
 def _parse_cli_args(raw: str | None) -> list[str]:
     if not raw:
         return []
-    parsed = json.loads(raw)
-    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
-        raise HTTPException(status_code=400, detail="cli_args must be a JSON array of strings")
-    return parsed
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    parsed = shlex.split(raw)
+    if parsed:
+        return parsed
+    raise HTTPException(status_code=400, detail="cli_args must contain at least one argument")
 
 
 def _find_output_file(output_dir: Path) -> Path | None:
