@@ -69,6 +69,17 @@ class CoreHelpersTest(unittest.TestCase):
         self.assertEqual(result["kind"], "archive")
         self.assertEqual(result["supported_entries"][0]["path"], "cube.stl")
 
+    def test_inspect_binary_stl_even_with_bin_extension(self):
+        with TemporaryDirectory() as tmp:
+            stl = Path(tmp) / "download.bin"
+            header = b"Rhinoceros Binary STL".ljust(80, b" ")
+            stl.write_bytes(header + (1).to_bytes(4, "little") + (b"\0" * 50))
+
+            result = main._inspect_download_file(stl)
+
+        self.assertEqual(result["kind"], "geometry")
+        self.assertEqual(result["supported_entries"][0]["filename"], "download.stl")
+
     def test_create_import_ignores_entry_path_for_direct_3mf(self):
         with TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
@@ -100,6 +111,37 @@ class CoreHelpersTest(unittest.TestCase):
 
         self.assertEqual(result["imported_model"]["filename"], "direct.3mf")
         self.assertEqual(result["imported_model"]["import_type"], "project_or_geometry")
+
+    def test_create_import_renames_binary_stl_downloaded_as_bin(self):
+        with TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            source = data_dir / "download.bin"
+            header = b"Rhinoceros Binary STL".ljust(80, b" ")
+            source.write_bytes(header + (1).to_bytes(4, "little") + (b"\0" * 50))
+
+            old_downloads = main.remote_downloads
+            old_imports = main.imported_models
+            main.remote_downloads = {
+                "download-id": main.RemoteDownloadJob(
+                    id="download-id",
+                    url="https://example.invalid/download",
+                    filename="download.bin",
+                    output_dir=str(data_dir),
+                    status="succeeded",
+                    path=str(source),
+                    size=source.stat().st_size,
+                )
+            }
+            main.imported_models = {}
+            try:
+                with unittest.mock.patch.dict(main.os.environ, {"ORCA_SERVICE_DATA_DIR": str(data_dir)}):
+                    result = main.create_import(main.ImportRequest(download_id="download-id"))
+            finally:
+                main.remote_downloads = old_downloads
+                main.imported_models = old_imports
+
+        self.assertEqual(result["imported_model"]["filename"], "download.stl")
+        self.assertEqual(result["imported_model"]["import_type"], "geometry")
 
 
 if __name__ == "__main__":

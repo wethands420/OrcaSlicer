@@ -232,6 +232,24 @@ def _detect_import_type(path: Path) -> ImportType | None:
     return None
 
 
+def _binary_stl_name(path: Path) -> str:
+    return _safe_name(path.with_suffix(".stl").name)
+
+
+def _looks_like_binary_stl(path: Path) -> bool:
+    try:
+        size = path.stat().st_size
+        if size < 84:
+            return False
+        with path.open("rb") as file:
+            header = file.read(84)
+        triangle_count = struct.unpack("<I", header[80:84])[0]
+    except OSError:
+        return False
+
+    return 84 + triangle_count * 50 == size
+
+
 def _is_safe_zip_member(name: str) -> bool:
     entry = Path(name)
     return bool(name) and not entry.is_absolute() and ".." not in entry.parts
@@ -250,6 +268,20 @@ def _inspect_download_file(path: Path) -> dict[str, Any]:
     if not import_type:
         if zipfile.is_zipfile(path):
             import_type = "archive"
+        elif _looks_like_binary_stl(path):
+            return {
+                "kind": "geometry",
+                "filename": _binary_stl_name(path),
+                "size": path.stat().st_size,
+                "supported_entries": [
+                    {
+                        "path": path.name,
+                        "filename": _binary_stl_name(path),
+                        "import_type": "geometry",
+                        "size": path.stat().st_size,
+                    }
+                ],
+            }
         else:
             return {
                 "kind": "unsupported",
@@ -339,6 +371,29 @@ def _download_remote_file(download_id: str, request: RemoteDownloadRequest) -> N
         written = 0
         with urllib.request.urlopen(req, timeout=60) as response, tmp_path.open("wb") as target:
             job.mime_type = request.mime_type or response.headers.get_content_type()
+            (target_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "request": {
+                            "url": request.url,
+                            "filename": request.filename,
+                            "mime_type": request.mime_type,
+                            "referer": request.referer,
+                            "has_cookie_header": bool(request.cookie_header),
+                            "extra_header_names": sorted(request.extra_headers.keys()),
+                        },
+                        "response": {
+                            "url": response.geturl(),
+                            "status": response.status,
+                            "content_type": response.headers.get_content_type(),
+                            "content_length": response.headers.get("Content-Length"),
+                            "content_disposition": response.headers.get("Content-Disposition"),
+                        },
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
             while True:
                 chunk = response.read(1024 * 256)
                 if not chunk:
@@ -764,9 +819,13 @@ def create_import(request: ImportRequest) -> dict[str, object]:
             source_entry_path = request.entry_path
     else:
         import_type = source_import_type
-        if not import_type or import_type == "archive":
-            raise HTTPException(status_code=400, detail="download requires selecting a supported archive entry")
-        target_path = target_dir / _safe_name(source_path.name)
+        if not import_type and _looks_like_binary_stl(source_path):
+            import_type = "geometry"
+            target_path = target_dir / _binary_stl_name(source_path)
+        else:
+            if not import_type or import_type == "archive":
+                raise HTTPException(status_code=400, detail="download requires selecting a supported archive entry")
+            target_path = target_dir / _safe_name(source_path.name)
         shutil.copy2(source_path, target_path)
         source_entry_path = None
 
