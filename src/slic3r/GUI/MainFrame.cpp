@@ -1047,7 +1047,10 @@ void MainFrame::update_layout()
         m_tabpanel->Bind(wxCUSTOMEVT_NOTEBOOK_SEL_CHANGED, [this](wxCommandEvent& evt)
         {
             if (evt.GetId() == tpHome) {
-                show_home_page();
+                if (m_tabpanel->GetSelection() == tpHome)
+                    show_home_page();
+                else
+                    evt.Skip();
                 return;
             }
 
