@@ -89,6 +89,7 @@ public:
         {
             if (int page_idx = evt.GetId(); page_idx >= 0)
                 SetSelection(page_idx);
+            evt.Skip();
         });
 
         this->Bind(wxEVT_NAVIGATION_KEY, &Notebook::OnNavigationKey, this);

@@ -1046,6 +1046,11 @@ void MainFrame::update_layout()
 
         m_tabpanel->Bind(wxCUSTOMEVT_NOTEBOOK_SEL_CHANGED, [this](wxCommandEvent& evt)
         {
+            if (evt.GetId() == tpHome) {
+                show_home_page();
+                return;
+            }
+
             // jump to 3deditor under preview_only mode
             if (evt.GetId() == tp3DEditor){
                 Sidebar& sidebar = GUI::wxGetApp().sidebar();
