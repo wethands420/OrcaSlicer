@@ -3,6 +3,7 @@ package de.orcamobile.app;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.SharedPreferences;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
@@ -40,6 +41,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
+    private static final String PREFS_NAME = "orca_mobile";
+    private static final String PREF_SERVER_BASE = "server_base";
+    private static final String DEFAULT_SERVER_BASE = "http://192.168.1.79:8787";
+
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
@@ -63,8 +68,24 @@ public class MainActivity extends Activity {
 
         serverInput = new EditText(this);
         serverInput.setSingleLine(true);
-        serverInput.setText("http://192.168.1.79:8787");
+        serverInput.setText(loadServerBase());
         root.addView(serverInput, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout serverTools = new LinearLayout(this);
+        serverTools.setOrientation(LinearLayout.HORIZONTAL);
+        Button saveServerButton = new Button(this);
+        saveServerButton.setText("Speichern");
+        saveServerButton.setOnClickListener(v -> saveServerBase());
+        serverTools.addView(saveServerButton, new LinearLayout.LayoutParams(0, -2, 1));
+        Button printerStatusButton = new Button(this);
+        printerStatusButton.setText("Status");
+        printerStatusButton.setOnClickListener(v -> checkPrinterStatus());
+        serverTools.addView(printerStatusButton, new LinearLayout.LayoutParams(0, -2, 1));
+        Button cancelPrintButton = new Button(this);
+        cancelPrintButton.setText("Stop");
+        cancelPrintButton.setOnClickListener(v -> confirmCancelPrint());
+        serverTools.addView(cancelPrintButton, new LinearLayout.LayoutParams(0, -2, 1));
+        root.addView(serverTools, new LinearLayout.LayoutParams(-1, -2));
 
         LinearLayout quickLinks = new LinearLayout(this);
         quickLinks.setOrientation(LinearLayout.HORIZONTAL);
@@ -179,8 +200,78 @@ public class MainActivity extends Activity {
         return value;
     }
 
+    private String loadServerBase() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(PREF_SERVER_BASE, DEFAULT_SERVER_BASE);
+    }
+
+    private void saveServerBase() {
+        String value = serverBase();
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putString(PREF_SERVER_BASE, value)
+                .apply();
+        setStatus("Server gespeichert: " + value);
+    }
+
     private void setStatus(String text) {
         mainHandler.post(() -> statusText.setText(text));
+    }
+
+    private void checkPrinterStatus() {
+        setStatus("Druckerstatus wird abgefragt...");
+        executor.submit(() -> {
+            try {
+                JSONObject response = getJson("/api/v1/printer/status");
+                JSONObject printerStatus = response.getJSONObject("status");
+                setStatus(formatPrinterStatus(printerStatus));
+            } catch (Exception e) {
+                setStatus("Druckerstatus fehlgeschlagen: " + e.getMessage());
+            }
+        });
+    }
+
+    private String formatPrinterStatus(JSONObject printerStatus) {
+        String state = printerStatus.optString("gcode_state", "unbekannt");
+        String stage = printerStatus.optString("mc_print_stage", "");
+        String percent = printerStatus.has("mc_percent") ? printerStatus.optString("mc_percent") + "%" : "";
+        String remaining = printerStatus.has("mc_remaining_time") ? printerStatus.optString("mc_remaining_time") + " min" : "";
+        String file = printerStatus.optString("gcode_file", "");
+        StringBuilder text = new StringBuilder("Drucker: ").append(state);
+        if (!stage.isEmpty()) {
+            text.append(" / ").append(stage);
+        }
+        if (!percent.isEmpty()) {
+            text.append(" / ").append(percent);
+        }
+        if (!remaining.isEmpty()) {
+            text.append(" / ").append(remaining);
+        }
+        if (!file.isEmpty()) {
+            text.append(" / ").append(file);
+        }
+        return text.toString();
+    }
+
+    private void confirmCancelPrint() {
+        new AlertDialog.Builder(this)
+                .setTitle("Druck abbrechen?")
+                .setMessage("Der aktuelle Druckauftrag wird am Bambu A1 gestoppt.")
+                .setNegativeButton("Abbrechen", null)
+                .setPositiveButton("Stop", (dialog, which) -> cancelPrint())
+                .show();
+    }
+
+    private void cancelPrint() {
+        setStatus("Druckabbruch wird gesendet...");
+        executor.submit(() -> {
+            try {
+                JSONObject response = postJson("/api/v1/printer/cancel", new JSONObject());
+                JSONObject printerStatus = response.optJSONObject("status");
+                setStatus(printerStatus == null ? "Druckabbruch gesendet." : "Druckabbruch gesendet: " + formatPrinterStatus(printerStatus));
+            } catch (Exception e) {
+                setStatus("Druckabbruch fehlgeschlagen: " + e.getMessage());
+            }
+        });
     }
 
     private void startRemoteDownload(String url, String filename, String mimeType, String userAgent, String cookies) {
@@ -462,13 +553,30 @@ public class MainActivity extends Activity {
         TextView label = new TextView(this);
         label.setText("Auf Drucker: " + prepared.optString("uploaded_filename"));
         importList.addView(label, new LinearLayout.LayoutParams(-1, -2));
+        addActionButton("Druckerstatus", v -> checkPrinterStatus());
         addActionButton("Druck starten", v -> confirmStartPrint());
+        addActionButton("Druck abbrechen", v -> confirmCancelPrint());
     }
 
     private void confirmStartPrint() {
+        setStatus("Druckerstatus wird vor Start geprüft...");
+        executor.submit(() -> {
+            try {
+                JSONObject response = getJson("/api/v1/printer/status");
+                JSONObject printerStatus = response.getJSONObject("status");
+                String message = formatPrinterStatus(printerStatus) + "\n\nDer Druck wird auf dem Bambu A1 gestartet.";
+                mainHandler.post(() -> showStartPrintDialog(message));
+            } catch (Exception e) {
+                String message = "Druckerstatus konnte nicht gelesen werden:\n" + e.getMessage() + "\n\nTrotzdem starten?";
+                mainHandler.post(() -> showStartPrintDialog(message));
+            }
+        });
+    }
+
+    private void showStartPrintDialog(String message) {
         new AlertDialog.Builder(this)
                 .setTitle("Druck starten?")
-                .setMessage("Der Druck wird auf dem Bambu A1 gestartet.")
+                .setMessage(message)
                 .setNegativeButton("Abbrechen", null)
                 .setPositiveButton("Starten", (dialog, which) -> startPrint())
                 .show();
