@@ -200,7 +200,8 @@ public class MainActivity extends Activity {
     }
 
     private void renderBrowse() {
-        LinearLayout screen = screenScrollContent();
+        LinearLayout screen = vertical();
+        screen.setPadding(dp(20), dp(10), dp(20), dp(8));
         addScreenTitle(screen, "Entdecken", "Durchsuche Modell-Webseiten und importiere Dateien direkt auf die VM.");
 
         HorizontalScrollView scroll = new HorizontalScrollView(this);
@@ -225,11 +226,13 @@ public class MainActivity extends Activity {
         detach(webView);
         LinearLayout browserCard = card();
         browserCard.setPadding(0, 0, 0, 0);
-        browserCard.addView(webView, new LinearLayout.LayoutParams(-1, dp(390)));
-        screen.addView(browserCard, new LinearLayout.LayoutParams(-1, -2));
+        browserCard.addView(webView, new LinearLayout.LayoutParams(-1, -1));
+        screen.addView(browserCard, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        attachWorkflowPanel(screen, "Download & Import");
-        contentFrame.addView(wrapScroll(screen));
+        TextView hint = body(lastDownloadId == null ? "Downloads erscheinen nach der Prüfung im Tab Projekte." : "Download erkannt. Wechsle zu Projekte fur Import und Druckvorbereitung.");
+        hint.setGravity(Gravity.CENTER);
+        screen.addView(hint, new LinearLayout.LayoutParams(-1, -2));
+        contentFrame.addView(screen);
     }
 
     private void renderProjects() {
@@ -767,7 +770,10 @@ public class MainActivity extends Activity {
         }
         setStatus("Gefundene Dateien: " + entries.length());
         String kind = inspection.optString("kind");
-        mainHandler.post(() -> renderImportEntries(kind, entries));
+        mainHandler.post(() -> {
+            renderImportEntries(kind, entries);
+            selectTab("project");
+        });
     }
 
     private void renderImportEntries(String kind, JSONArray entries) {
