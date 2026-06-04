@@ -3,11 +3,9 @@ package de.orcamobile.app;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -213,15 +211,6 @@ public class MainActivity extends Activity {
         addPlatformChip(platforms, "Cults3D", "https://cults3d.com/");
         scroll.addView(platforms);
         screen.addView(scroll, new LinearLayout.LayoutParams(-1, dp(54)));
-
-        LinearLayout browserTools = horizontal();
-        browserTools.addView(secondaryButton("Zuruck", v -> {
-            if (webView.canGoBack()) {
-                webView.goBack();
-            }
-        }), new LinearLayout.LayoutParams(0, dp(48), 1));
-        browserTools.addView(secondaryButton("Extern offnen", v -> openCurrentPageExternally()), new LinearLayout.LayoutParams(0, dp(48), 1));
-        screen.addView(browserTools, new LinearLayout.LayoutParams(-1, -2));
 
         detach(webView);
         LinearLayout browserCard = card();
@@ -957,14 +946,6 @@ public class MainActivity extends Activity {
                 setStatus("Druckstart fehlgeschlagen: " + e.getMessage());
             }
         });
-    }
-
-    private void openCurrentPageExternally() {
-        String url = webView.getUrl();
-        if (url == null || url.isEmpty()) {
-            return;
-        }
-        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
     }
 
     private JSONObject getJson(String path) throws Exception {
