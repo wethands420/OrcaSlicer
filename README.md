@@ -73,6 +73,12 @@ The [wiki](https://www.orcaslicer.com/wiki) aims to provide a detailed explanati
 - **[Access the wiki here](https://www.orcaslicer.com/wiki)**
 - **[Contribute to the wiki](https://www.orcaslicer.com/wiki/how_to_wiki)**
 
+# Fork documentation
+
+This fork also contains project-specific engineering documentation for the embedded browser and custom download/import integration:
+
+- **[Project documentation index](./docs/README.md)**
+
 # Download
 
 ## Stable Release
